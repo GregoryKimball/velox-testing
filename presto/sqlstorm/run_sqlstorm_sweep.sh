@@ -32,6 +32,8 @@ OPTIONS:
 
 ENVIRONMENT VARIABLES:
     PRESTO_DATA_DIR          Parent directory of stackoverflow_dba/ (required).
+    PRESTO_IMAGE_TAG         Run local images with this tag (e.g. built from source) instead of
+                             pulling the public images.
     GPU_EXTRA_WORKER_CONFIG  Space-separated properties appended to the GPU worker config
                              (default: "cudf.ast_expression_enabled=false", which avoids a worker
                              crash on aarch64 when cuDF rejects an AST expression).
@@ -117,7 +119,11 @@ start_cluster() {
       echo "${property}" >> "${config}"
     done
   done
-  (cd "${PRESTO_SCRIPTS}" && "./${start_script}" --use-public-images --skip-generate-config)
+  local image_args=(--use-public-images)
+  if [[ -n ${PRESTO_IMAGE_TAG:-} ]]; then
+    image_args=()
+  fi
+  (cd "${PRESTO_SCRIPTS}" && "./${start_script}" "${image_args[@]}" --skip-generate-config)
   wait_for_workers
 }
 
