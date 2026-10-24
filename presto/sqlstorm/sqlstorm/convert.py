@@ -15,11 +15,35 @@ from dataclasses import dataclass
 import sqlglot
 from sqlglot import exp
 
-# Every StackOverflow table has a non-null integer primary key named Id.
-BASE_TABLES = {
-    "posthistorytypes", "linktypes", "posttypes", "closereasontypes", "votetypes", "users",
-    "badges", "posts", "comments", "posthistory", "postlinks", "tags", "votes",
+# Columns of the StackOverflow tables (v1.0/stackoverflow/schema.sql). Every table has a
+# non-null integer primary key named Id.
+TABLE_COLUMNS = {
+    "posthistorytypes": {"id", "name"},
+    "linktypes": {"id", "name"},
+    "posttypes": {"id", "name"},
+    "closereasontypes": {"id", "name"},
+    "votetypes": {"id", "name"},
+    "users": {
+        "id", "reputation", "creationdate", "displayname", "lastaccessdate", "websiteurl", "location",
+        "aboutme", "views", "upvotes", "downvotes", "profileimageurl", "accountid",
+    },
+    "badges": {"id", "userid", "name", "date", "class", "tagbased"},
+    "posts": {
+        "id", "posttypeid", "acceptedanswerid", "parentid", "creationdate", "score", "viewcount", "body",
+        "owneruserid", "ownerdisplayname", "lasteditoruserid", "lasteditordisplayname", "lasteditdate",
+        "lastactivitydate", "title", "tags", "answercount", "commentcount", "favoritecount", "closeddate",
+        "communityowneddate", "contentlicense",
+    },
+    "comments": {"id", "postid", "score", "text", "creationdate", "userdisplayname", "userid", "contentlicense"},
+    "posthistory": {
+        "id", "posthistorytypeid", "postid", "revisionguid", "creationdate", "userid", "userdisplayname",
+        "comment", "text", "contentlicense",
+    },
+    "postlinks": {"id", "creationdate", "postid", "relatedpostid", "linktypeid"},
+    "tags": {"id", "tagname", "count", "excerptpostid", "wikipostid", "ismoderatoronly", "isrequired"},
+    "votes": {"id", "postid", "votetypeid", "userid", "creationdate", "bountyamount"},
 }  # fmt: skip
+BASE_TABLES = set(TABLE_COLUMNS)
 TIMESTAMP_COLUMNS = {
     "creationdate", "lastaccessdate", "date", "lasteditdate", "lastactivitydate", "closeddate",
     "communityowneddate",
@@ -61,6 +85,9 @@ def rewrite(tree):
     for rule in (
         rewrite_string_to_array,
         rewrite_lateral_unnest,
+        rewrite_select_list_unnest,
+        rewrite_any_array,
+        rewrite_group_by_output_alias,
         rewrite_epoch_of_difference,
         rewrite_count_of_table_alias,
         rewrite_fetch_to_limit,
@@ -97,12 +124,65 @@ def rewrite_string_to_array(tree):
     return tree
 
 
+def iter_ancestors(node, stop):
+    node = node.parent
+    while node is not None and node is not stop:
+        yield node
+        node = node.parent
+
+
+def rewrite_select_list_unnest(tree):
+    """SELECT unnest(a) AS x ... -> SELECT _srf.x ... CROSS JOIN UNNEST(a) AS _srf(x).
+
+    A set-returning function in the select list emits one row per array element and no
+    row for an empty or NULL array, which is what CROSS JOIN UNNEST does. Several of them
+    are zipped with NULL padding (Postgres 10+), as is a multi-argument UNNEST. Window
+    functions and aggregates in the argument are evaluated before the expansion in
+    Postgres, so those selects are left alone.
+    """
+    for select in list(tree.find_all(exp.Select)):
+        explodes = [e for e in select.find_all(exp.Explode) if e.parent_select is select]
+        if not explodes:
+            continue
+        if any(w.parent_select is select for w in select.find_all(exp.Window)):
+            raise Unsupported("set-returning function with window functions")
+        for e in explodes:
+            if e.this.find(exp.AggFunc):
+                raise Unsupported("set-returning function over an aggregate")
+            if any(isinstance(a, (exp.AggFunc, exp.Where, exp.Having, exp.Explode)) for a in iter_ancestors(e, select)):
+                raise Unsupported("set-returning function inside an aggregate, predicate or another one")
+
+        distinct = []
+        for e in explodes:
+            if e not in distinct:
+                distinct.append(e)
+        columns = []
+        for i, e in enumerate(distinct):
+            projection = e.parent
+            name = projection.alias if isinstance(projection, exp.Alias) and projection.this is e else ""
+            if not name or name.lower() in {c.lower() for c in columns}:
+                name = f"unnest_value{i}"
+            columns.append(name)
+        arrays = [e.this.copy() for e in distinct]
+        for e in explodes:
+            e.replace(exp.column(columns[distinct.index(e)], table="_srf"))
+        unnest = exp.Unnest(
+            expressions=arrays,
+            alias=exp.TableAlias(this=exp.to_identifier("_srf"), columns=[exp.to_identifier(c) for c in columns]),
+        )
+        if select.args.get("from_"):
+            select.append("joins", exp.Join(this=unnest, kind="CROSS"))
+        else:
+            select.set("from_", exp.From(this=unnest))
+    return tree
+
+
 def lateral_unnest_parts(lateral):
-    """Returns (array expression, column name) for the two lateral unnest shapes, else None."""
+    """Returns (array expression, column name) for the lateral unnest shapes, else None."""
     alias = lateral.args.get("alias")
     if alias is None:
         return None
-    source = lateral.this
+    source = lateral.this if isinstance(lateral, exp.Lateral) else lateral
     if isinstance(source, exp.Unnest) and len(source.expressions) == 1:
         columns = alias.columns
         column = columns[0].name if len(columns) == 1 else alias.name
@@ -120,13 +200,16 @@ def lateral_unnest_parts(lateral):
 
 
 def rewrite_lateral_unnest(tree):
-    """JOIN LATERAL unnest(...) -> CROSS JOIN UNNEST(...); Presto only supports UNNEST on a cross join.
+    """[LEFT] JOIN [LATERAL] unnest(...) -> CROSS JOIN UNNEST(...); Presto only supports UNNEST on a
+    cross join. Functions in FROM are implicitly lateral in Postgres.
 
     LEFT joins keep a NULL row for an empty or NULL array, matching Postgres.
     """
     for join in list(tree.find_all(exp.Join)):
         lateral = join.this
-        if not isinstance(lateral, exp.Lateral):
+        if not isinstance(lateral, (exp.Lateral, exp.Unnest)):
+            continue
+        if isinstance(lateral, exp.Unnest) and (join.kind or "").upper() == "CROSS":
             continue
         parts = lateral_unnest_parts(lateral)
         if parts is None:
@@ -155,6 +238,84 @@ def rewrite_lateral_unnest(tree):
             alias=exp.TableAlias(this=exp.to_identifier(lateral.alias), columns=[exp.to_identifier(column)]),
         )
         join.replace(exp.Join(this=unnest, kind="CROSS"))
+    return tree
+
+
+def rewrite_any_array(tree):
+    """x = ANY(array) -> CONTAINS(array, x); both are NULL when x is NULL or when x is not found
+    and the array contains NULL."""
+    for node in list(tree.find_all(exp.Any)):
+        target = node.this.unnest()
+        if isinstance(target, (exp.Subquery, exp.Select)):
+            continue
+        comparison = node.parent
+        if not (isinstance(comparison, exp.EQ) and comparison.expression is node):
+            raise Unsupported("ANY(array) with an operator other than =")
+        comparison.replace(exp.Anonymous(this="CONTAINS", expressions=[target.copy(), comparison.this.copy()]))
+    return tree
+
+
+def source_columns(source, tree):
+    """Lowercase output column names of a FROM/JOIN source, or None if unknown."""
+    if isinstance(source, exp.Table):
+        name = source.name.lower()
+        for cte in tree.find_all(exp.CTE):
+            if cte.alias.lower() == name:
+                return select_output_names(cte.this)
+        return TABLE_COLUMNS.get(name)
+    if isinstance(source, exp.Subquery):
+        return select_output_names(source.this)
+    if isinstance(source, (exp.Unnest, exp.Lateral)):
+        alias = source.args.get("alias")
+        if alias is not None and alias.columns:
+            return {c.name.lower() for c in alias.columns}
+    return None
+
+
+def select_output_names(query):
+    if isinstance(query, exp.Union):
+        query = query.left
+    if not isinstance(query, exp.Select) or any(isinstance(e, exp.Star) for e in query.expressions):
+        return None
+    alias = query.parent.args.get("alias") if query.parent is not None else None
+    if alias is not None and getattr(alias, "columns", None):
+        return {c.name.lower() for c in alias.columns}
+    return {e.alias_or_name.lower() for e in query.expressions}
+
+
+def rewrite_group_by_output_alias(tree):
+    """GROUP BY <output alias> -> GROUP BY <aliased expression>.
+
+    Postgres resolves a bare GROUP BY name to an input column first and to an output alias
+    only if no input column has that name, so the rewrite applies only when every source's
+    columns are known and none of them has the name.
+    """
+    for select in list(tree.find_all(exp.Select)):
+        group = select.args.get("group")
+        if not group:
+            continue
+        aliased = {e.alias.lower(): e.this for e in select.expressions if isinstance(e, exp.Alias)}
+        sources = []
+        if select.args.get("from_"):
+            sources.append(select.args["from_"].this)
+        sources.extend(join.this for join in select.args.get("joins") or [])
+        input_columns = set()
+        for source in sources:
+            columns = source_columns(source, tree)
+            if columns is None:
+                input_columns = None
+                break
+            input_columns |= columns
+        if input_columns is None:
+            continue
+        for node in list(group.expressions):
+            if not isinstance(node, exp.Column) or node.table:
+                continue
+            name = node.name.lower()
+            expression = aliased.get(name)
+            if expression is None or name in input_columns or expression.find(exp.AggFunc, exp.Window):
+                continue
+            node.replace(expression.copy())
     return tree
 
 
@@ -216,15 +377,23 @@ def rewrite_fetch_to_limit(tree):
 
 
 def is_timestamp(node):
+    """Heuristic for timestamp-typed expressions. Used only to decide whether a date-like
+    string literal next to the expression should get an explicit cast."""
     node = node.unnest()
     if isinstance(node, exp.Column):
-        return node.name.lower() in TIMESTAMP_COLUMNS
+        name = node.name.lower()
+        return name in TIMESTAMP_COLUMNS or "date" in name
     if isinstance(node, (exp.CurrentTimestamp, exp.CurrentDate)):
         return True
     if isinstance(node, exp.Cast):
         return node.to.this in (exp.DataType.Type.TIMESTAMP, exp.DataType.Type.DATE)
     if isinstance(node, (exp.Add, exp.Sub)):
         return is_timestamp(node.this) or is_timestamp(node.expression)
+    if isinstance(node, (exp.Min, exp.Max)):
+        return is_timestamp(node.this)
+    if isinstance(node, exp.Case):
+        branches = [i.args.get("true") for i in node.args.get("ifs") or []] + [node.args.get("default")]
+        return any(b is not None and is_timestamp(b) for b in branches)
     return False
 
 
