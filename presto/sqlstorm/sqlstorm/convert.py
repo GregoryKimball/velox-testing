@@ -86,11 +86,14 @@ def rewrite(tree):
         rewrite_string_to_array,
         rewrite_lateral_unnest,
         rewrite_select_list_unnest,
+        rewrite_join_subquery_conditions,
         rewrite_any_array,
         rewrite_group_by_output_alias,
         rewrite_epoch_of_difference,
         rewrite_count_of_table_alias,
         rewrite_fetch_to_limit,
+        rewrite_empty_array_literals,
+        rewrite_window_filter,
         cast_timestamp_literals,
         add_functionally_dependent_group_by,
     ):
@@ -199,6 +202,21 @@ def lateral_unnest_parts(lateral):
     return None
 
 
+def filter_by_join_condition(array, on, alias, column):
+    """FILTER(array, x -> on) with the unnested column replaced by x. A LEFT JOIN keeps the
+    matching elements, or one NULL row if none match, which the caller adds."""
+    if on.find(exp.Subquery, exp.Select, exp.Exists):
+        raise Unsupported("LEFT JOIN LATERAL unnest with a subquery in the join condition")
+    condition = on.copy()
+    for col in list(condition.find_all(exp.Column)):
+        if col.table.lower() == alias.lower() or (not col.table and col.name.lower() == column.lower()):
+            if col.name.lower() != column.lower():
+                raise Unsupported("LEFT JOIN LATERAL unnest condition on an unknown column")
+            col.replace(exp.column("_unnest_x"))
+    lambda_ = exp.Lambda(this=condition, expressions=[exp.to_identifier("_unnest_x")])
+    return exp.Anonymous(this="FILTER", expressions=[array, lambda_])
+
+
 def rewrite_lateral_unnest(tree):
     """[LEFT] JOIN [LATERAL] unnest(...) -> CROSS JOIN UNNEST(...); Presto only supports UNNEST on a
     cross join. Functions in FROM are implicitly lateral in Postgres.
@@ -221,7 +239,7 @@ def rewrite_lateral_unnest(tree):
         array = array.copy()
         if side == "LEFT":
             if not trivially_true:
-                raise Unsupported("LEFT JOIN LATERAL unnest with a join condition")
+                array = filter_by_join_condition(array, on, lateral.alias, column)
             array = exp.If(
                 this=exp.GT(this=exp.ArraySize(this=array.copy()), expression=exp.Literal.number(0)),
                 true=array,
@@ -230,14 +248,47 @@ def rewrite_lateral_unnest(tree):
         elif side:
             raise Unsupported(f"{side} JOIN LATERAL unnest")
         elif not trivially_true:
-            select = join.parent_select
-            select.where(on.copy(), copy=False)
+            move_to_where(join, [on])
 
         unnest = exp.Unnest(
             expressions=[array],
             alias=exp.TableAlias(this=exp.to_identifier(lateral.alias), columns=[exp.to_identifier(column)]),
         )
         join.replace(exp.Join(this=unnest, kind="CROSS"))
+    return tree
+
+
+def move_to_where(join, conditions):
+    """Moves inner join conditions to the WHERE clause. Equivalent unless a later RIGHT or
+    FULL join could make NULL rows that the condition would have removed earlier."""
+    select = join.parent
+    joins = (select.args.get("joins") or []) if isinstance(select, exp.Select) else []
+    if not any(j is join for j in joins) or (join.side or "") or (join.kind or "").upper() not in ("", "INNER", "CROSS"):
+        raise Unsupported("join condition cannot be moved to WHERE")
+    later = joins[next(i for i, j in enumerate(joins) if j is join) + 1 :]
+    if any((j.side or "").upper() in ("RIGHT", "FULL") for j in later):
+        raise Unsupported("join condition cannot be moved past a RIGHT or FULL join")
+    for condition in conditions:
+        select.where(condition.copy(), copy=False)
+
+
+def rewrite_join_subquery_conditions(tree):
+    """Presto rejects subqueries in join conditions; for inner joins they can move to WHERE."""
+    for join in list(tree.find_all(exp.Join)):
+        on = join.args.get("on")
+        if on is None or not on.find(exp.Subquery, exp.Exists, exp.Select):
+            continue
+        conjuncts = list(on.flatten()) if isinstance(on, exp.And) else [on]
+        moved = [c for c in conjuncts if c.find(exp.Subquery, exp.Exists, exp.Select)]
+        if (join.side or "").upper():
+            continue
+        move_to_where(join, moved)
+        kept = [c for c in conjuncts if c not in moved]
+        if kept:
+            join.set("on", exp.and_(*[c.copy() for c in kept]))
+        else:
+            join.set("on", None)
+            join.set("kind", "CROSS")
     return tree
 
 
@@ -352,12 +403,18 @@ def rewrite_count_of_table_alias(tree):
     """COUNT(t) where t is a table alias -> COUNT(t.Id); a row value is NULL only for an unmatched outer join."""
     for count in list(tree.find_all(exp.Count)):
         arg = count.this
-        if not isinstance(arg, exp.Column) or arg.table:
+        if not isinstance(arg, exp.Column):
+            continue
+        if isinstance(arg.this, exp.Star) and arg.table:
+            alias = arg.table
+        elif not arg.table:
+            alias = arg.name
+        else:
             continue
         select = count.parent_select
         while select is not None:
-            if arg.name.lower() in table_aliases(select):
-                arg.replace(exp.column("id", table=arg.name))
+            if alias.lower() in table_aliases(select):
+                arg.replace(exp.column("id", table=alias))
                 break
             select = select.parent_select
     return tree
@@ -423,10 +480,46 @@ def cast_timestamp_literals(tree):
                     cast_to_timestamp(value)
     for node in list(tree.find_all(exp.Coalesce, exp.Nullif)):
         args = [node.this, *node.expressions] if isinstance(node, exp.Coalesce) else [node.this, node.expression]
-        if any(is_timestamp(arg) for arg in args):
+        # A wrong guess here is a type error in Presto, never a silent change of meaning.
+        if any(is_timestamp(arg) or not isinstance(arg.unnest(), exp.Literal) for arg in args):
             for arg in args:
                 if is_timestamp_literal(arg):
                     cast_to_timestamp(arg)
+    return tree
+
+
+def rewrite_window_filter(tree):
+    """agg(x) FILTER (WHERE c) OVER w -> agg(CASE WHEN c THEN x END) OVER w, for aggregates
+    that ignore NULL inputs; Presto supports FILTER only on plain aggregates."""
+    for window in list(tree.find_all(exp.Window)):
+        node = window.this
+        if not isinstance(node, exp.Filter):
+            continue
+        agg, condition = node.this, node.expression.this
+        if not isinstance(agg, (exp.Count, exp.Sum, exp.Avg, exp.Min, exp.Max)):
+            raise Unsupported(f"FILTER on window function {agg.key}")
+        arg = agg.this
+        distinct = isinstance(arg, exp.Distinct)
+        values = arg.expressions if distinct else [arg]
+        if len(values) != 1:
+            raise Unsupported("FILTER on a multi-argument window aggregate")
+        value = exp.Literal.number(1) if isinstance(values[0], exp.Star) else values[0]
+        case = exp.Case(ifs=[exp.If(this=condition.copy(), true=value.copy())])
+        agg = agg.copy()
+        agg.set("this", exp.Distinct(expressions=[case]) if distinct else case)
+        node.replace(agg)
+    return tree
+
+
+def rewrite_empty_array_literals(tree):
+    """COALESCE(array, '{}') -> COALESCE(array, ARRAY[]); '{}' is Postgres' empty array literal."""
+    for node in list(tree.find_all(exp.Coalesce)):
+        args = [node.this, *node.expressions]
+        if not any(isinstance(a.unnest(), (exp.ArrayAgg, exp.Array, exp.Split)) for a in args):
+            continue
+        for arg in args:
+            if isinstance(arg, exp.Literal) and arg.is_string and arg.this == "{}":
+                arg.replace(exp.Array(expressions=[]))
     return tree
 
 
