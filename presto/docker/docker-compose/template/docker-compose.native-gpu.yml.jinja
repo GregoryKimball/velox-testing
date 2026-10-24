@@ -24,6 +24,7 @@ x-presto-native-worker-gpu: &gpu_worker_base
   ulimits:
     memlock: -1
     stack: 67108864
+    nofile: 524288
   shm_size: 1g
   # UCX needs the containers to be able to see all devices, although we then need to limit which they use.
   deploy:
