@@ -64,9 +64,13 @@ not converted. Converted SQL is not saved.
   pinning when it is missing.
 - On kernels with a page size other than 4KB (for example 64KB aarch64 kernels), Velox's
   mmap allocator cannot start; config generation disables it automatically.
-- On aarch64, the GPU worker crashes when an exception is thrown inside the cuDF operator
-  replacement step (the stack trace capture segfaults). With the default config, cuDF's
-  AST support check throws for many expressions, so `run_sqlstorm_sweep.sh` sets
-  `cudf.ast_expression_enabled=false` by default (`GPU_EXTRA_WORKER_CONFIG`). With CPU
-  fallback disabled, an unsupported operator raises an exception in the same step, so
-  those queries crash the worker instead of failing.
+- On aarch64, Velox's stack trace capture segfaults when an exception is thrown through
+  code built with SVE, which crashes the GPU worker. cuDF's AST support check throws for
+  many expressions, and with CPU fallback disabled every unsupported operator throws, so
+  images without the fix (including the public nightly images) crash on most queries.
+  For those images, set `GPU_EXTRA_WORKER_CONFIG=cudf.ast_expression_enabled=false`.
+  This avoids the crashes, but cuDF then cannot evaluate most filters and projections,
+  so almost every query falls back to CPU, and with CPU fallback disabled almost every
+  query fails. Images that do not crash can be built from the `fix-aarch64-sve-stacktrace`
+  branch of GregoryKimball/velox with `ARM_BUILD_TARGET=generic`. Without SVE code,
+  folly's exception tracer does not hit the same libunwind bug.

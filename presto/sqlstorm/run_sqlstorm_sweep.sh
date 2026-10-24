@@ -35,8 +35,9 @@ ENVIRONMENT VARIABLES:
     PRESTO_IMAGE_TAG         Run local images with this tag (e.g. built from source) instead of
                              pulling the public images.
     GPU_EXTRA_WORKER_CONFIG  Space-separated properties appended to the GPU worker config
-                             (default: "cudf.ast_expression_enabled=false", which avoids a worker
-                             crash on aarch64 when cuDF rejects an AST expression).
+                             (default: none). On aarch64 images without the stack trace fix,
+                             "cudf.ast_expression_enabled=false" avoids worker crashes (see
+                             README.md).
 
 EXAMPLES:
     $0 -s ~/SQLStorm -o results -l 10
@@ -52,7 +53,7 @@ LIMIT_ARGS=()
 OFFSET=0
 CONCURRENCY=8
 TIMEOUT=10
-GPU_EXTRA_WORKER_CONFIG=${GPU_EXTRA_WORKER_CONFIG-cudf.ast_expression_enabled=false}
+GPU_EXTRA_WORKER_CONFIG=${GPU_EXTRA_WORKER_CONFIG-}
 
 while [[ $# -gt 0 ]]; do
   case $1 in
