@@ -835,6 +835,27 @@ class Cluster:
         command_id = self.send_command([coordinator.instance_id], commands, f"benchmark {self.run_id}", wait=True)
         self.record_command(record_name, command_id)
 
+    def explain(self, tag: str, analyze: bool) -> None:
+        self.validate(cloud=True)
+        coordinator, _ = self.expected_inventory()
+        address = coordinator.private_ip or coordinator.private_dns
+        output = f"/opt/presto-aws/plans/{tag}"
+        commands = [
+            "set -eu",
+            (
+                "/opt/presto-aws/venv/bin/python /opt/velox-testing/presto/aws/ec2/remote/explain_plans.py "
+                f"{shlex.quote(address)} {shlex.quote(self.config.get('CATALOG_NAME', 'hive'))} "
+                f"{shlex.quote(self.config['SCHEMA_NAME'])} {shlex.quote(output)}"
+                + (" --analyze" if analyze else "")
+            ),
+            (
+                f"AWS_REGION={shlex.quote(self.config['AWS_REGION'])} "
+                f"aws s3 sync {shlex.quote(output)} {shlex.quote(self.result_uri() + '/plans/' + tag)} --only-show-errors"
+            ),
+        ]
+        command_id = self.send_command([coordinator.instance_id], commands, f"explain {self.run_id}", wait=True)
+        self.record_command(f"explain_{tag}", command_id)
+
     def run_cold_series(self, queries: str, repetitions: int, tag_prefix: str) -> None:
         self.validate(cloud=True)
         if self.config["ASYNC_DATA_CACHE_ENABLED"] != "false":
@@ -1068,6 +1089,9 @@ def build_parser() -> argparse.ArgumentParser:
     )
     cold_parser.add_argument("--repetitions", type=int, default=3)
     cold_parser.add_argument("--tag-prefix", default="sf1k")
+    explain_parser = subparsers.add_parser("explain")
+    explain_parser.add_argument("--tag", required=True)
+    explain_parser.add_argument("--analyze", action="store_true")
     return parser
 
 
@@ -1100,6 +1124,8 @@ def main() -> int:
             cluster.run_benchmark(args.queries, args.iterations, args.tag, clear_caches=args.clear_caches)
         elif args.command == "run-cache-series":
             cluster.run_cache_series(args.queries, args.tag_prefix)
+        elif args.command == "explain":
+            cluster.explain(args.tag, args.analyze)
         elif args.command == "run-cold-series":
             if args.repetitions <= 0:
                 raise ClusterError("--repetitions must be greater than zero")
