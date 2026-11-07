@@ -54,7 +54,9 @@ def _get_schema_info(hostname: str, port: int, user: str, schema_name: str) -> d
         return result
     conn = None
     try:
-        conn = prestodb.dbapi.connect(host=hostname, port=port, user=user, catalog="hive", schema=schema_name)
+        conn = prestodb.dbapi.connect(
+            host=hostname, port=port, user=user, catalog=os.environ.get("PRESTO_CATALOG", "hive"), schema=schema_name
+        )
         cursor = conn.cursor()
         tables = cursor.execute(f"SHOW TABLES IN {schema_name}").fetchall()
         if not tables:

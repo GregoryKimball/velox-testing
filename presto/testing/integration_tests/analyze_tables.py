@@ -6,7 +6,7 @@ import argparse
 import prestodb
 
 
-def check_tables_analyzed(presto_cursor, schema_name):
+def check_tables_analyzed(presto_cursor, schema_name, catalog="hive"):
     """Check that ANALYZE TABLE has been run on all tables in the given schema.
 
     Verifies that table statistics exist by checking if SHOW STATS FOR each table
@@ -17,7 +17,7 @@ def check_tables_analyzed(presto_cursor, schema_name):
         presto_cursor: Presto database cursor
         schema_name: Name of the schema containing tables to check
     """
-    tables = presto_cursor.execute(f"SHOW TABLES FROM hive.{schema_name}").fetchall()
+    tables = presto_cursor.execute(f"SHOW TABLES FROM {catalog}.{schema_name}").fetchall()
     table_names = [table_name for (table_name,) in tables]
 
     if not table_names:
@@ -25,7 +25,7 @@ def check_tables_analyzed(presto_cursor, schema_name):
 
     tables_missing_stats = []
     for table_name in table_names:
-        presto_cursor.execute(f"SHOW STATS FOR hive.{schema_name}.{table_name}")
+        presto_cursor.execute(f"SHOW STATS FOR {catalog}.{schema_name}.{table_name}")
         # Find column indices from the cursor description.
         col_names = [desc[0] for desc in presto_cursor.description]
         distinct_idx = col_names.index("distinct_values_count")

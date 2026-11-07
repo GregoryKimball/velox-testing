@@ -14,7 +14,7 @@ required=(
   COORDINATOR_QUERY_MEMORY_PER_NODE_GIB WORKER_SYSTEM_MEMORY_GIB
   WORKER_QUERY_MEMORY_GIB WORKER_MEMORY_LIMIT_GIB WORKER_MEMORY_SHRINK_GIB
   ASYNC_DATA_CACHE_ENABLED ASYNC_CACHE_SSD_GIB ASYNC_CACHE_NUM_SHARDS
-  COORDINATOR_IMAGE WORKER_IMAGE
+  COORDINATOR_IMAGE WORKER_IMAGE WORKER_ENGINE
 )
 for name in "${required[@]}"; do
   if [[ -z ${!name:-} ]]; then
@@ -27,6 +27,10 @@ if [[ ${ROLE} != coordinator && ${ROLE} != worker ]]; then
   echo "ROLE must be coordinator or worker" >&2
   exit 2
 fi
+if [[ ${WORKER_ENGINE} != native && ${WORKER_ENGINE} != java ]]; then
+  echo "WORKER_ENGINE must be native or java" >&2
+  exit 2
+fi
 if [[ ${ROLE} == worker && -z ${WORKER_INDEX:-} ]]; then
   echo "WORKER_INDEX is required for worker role" >&2
   exit 2
@@ -34,7 +38,11 @@ fi
 
 repo=/opt/velox-testing
 runtime_root=/opt/presto-aws
-generated="${repo}/presto/docker/config/generated/cpu"
+variant=cpu
+if [[ ${WORKER_ENGINE} == java ]]; then
+  variant=java
+fi
+generated="${repo}/presto/docker/config/generated/${variant}"
 base="${runtime_root}/base_config/${ROLE}"
 final="${runtime_root}/final_config/${ROLE}"
 assembled="${runtime_root}/runtime_etc"
@@ -96,7 +104,7 @@ PY
 cd "${repo}/presto/scripts"
 OVERWRITE_CONFIG=true \
 NUM_WORKERS="${WORKER_COUNT}" \
-VARIANT_TYPE=cpu \
+VARIANT_TYPE="${variant}" \
 VCPU_PER_WORKER="${VCPU_PER_WORKER}" \
   ./generate_presto_config.sh
 
@@ -105,25 +113,50 @@ mkdir -p "${base}" "${final}" "${assembled}" "${runtime_root}/data"
 
 if [[ ${ROLE} == coordinator ]]; then
   cp -a "${generated}/etc_common/." "${base}/"
-  cp "${generated}/etc_coordinator/config_native.properties" "${base}/config.properties"
+  cp "${generated}/etc_coordinator/config_${WORKER_ENGINE}.properties" "${base}/config.properties"
   cp "${generated}/etc_coordinator/node.properties" "${base}/node.properties"
   mkdir -p "${base}/catalog"
   cp "${generated}/etc_coordinator/catalog/hive.properties" "${base}/catalog/hive.properties"
 else
   worker_source="${generated}/etc_worker_0"
   cp -a "${generated}/etc_common/." "${base}/"
-  cp "${worker_source}/config_native.properties" "${base}/config.properties"
+  cp "${worker_source}/config_${WORKER_ENGINE}.properties" "${base}/config.properties"
   cp "${worker_source}/node.properties" "${base}/node.properties"
   mkdir -p "${base}/catalog"
   cp "${worker_source}/catalog/hive.properties" "${base}/catalog/hive.properties"
 fi
 cp -a "${base}/." "${final}/"
+if [[ ${WORKER_ENGINE} == native && ${ROLE} == worker ]]; then
+  sed 's/^connector\.name=.*/connector.name=iceberg/' \
+    "${final}/catalog/hive.properties" >"${final}/catalog/iceberg.properties"
+elif [[ ! -f ${final}/catalog/iceberg.properties ]]; then
+  cat >"${final}/catalog/iceberg.properties" <<'EOF'
+connector.name=iceberg
+hive.metastore=file
+hive.metastore.catalog.dir=file:/var/lib/presto/data/hive/metastore
+hive.s3.ssl.enabled=true
+hive.s3.path-style-access=false
+hive.s3.use-instance-credentials=true
+EOF
+fi
 delete_property "${final}/catalog/hive.properties" hive.max-split-size
 printf 'hive.max-split-size=%s\n' "${HIVE_MAX_SPLIT_SIZE}" \
   >>"${final}/catalog/hive.properties"
 delete_property "${final}/catalog/hive.properties" hive.split-loader-concurrency
 printf 'hive.split-loader-concurrency=%s\n' "${HIVE_SPLIT_LOADER_CONCURRENCY}" \
   >>"${final}/catalog/hive.properties"
+if [[ ${WORKER_ENGINE} == java ]]; then
+  upsert_property "${final}/catalog/hive.properties" \
+    hive.s3.use-instance-credentials true
+fi
+if [[ ${WORKER_ENGINE} == java || ${ROLE} == coordinator ]]; then
+  upsert_property "${final}/catalog/iceberg.properties" \
+    hive.s3.use-instance-credentials true
+  upsert_property "${final}/catalog/iceberg.properties" \
+    writer-sort-buffer-size "${ICEBERG_WRITER_SORT_BUFFER_SIZE:-64MB}"
+  upsert_property "${final}/catalog/iceberg.properties" \
+    max-open-sort-files "${ICEBERG_MAX_OPEN_SORT_FILES:-50}"
+fi
 
 if [[ ${ROLE} == coordinator ]]; then
   set_property "${final}/config.properties" discovery.uri \
@@ -142,9 +175,11 @@ if [[ ${ROLE} == coordinator ]]; then
     "$((COORDINATOR_QUERY_MEMORY_PER_NODE_GIB * WORKER_COUNT))GB"
   set_property "${final}/config.properties" memory.heap-headroom-per-node \
     "${COORDINATOR_HEADROOM_GIB}GB"
-  set_property "${final}/config.properties" single-node-execution-enabled false
-  set_property "${final}/config.properties" experimental.enable-dynamic-filtering \
-    "${DYNAMIC_FILTERING_ENABLED}"
+  if [[ ${WORKER_ENGINE} == native ]]; then
+    set_property "${final}/config.properties" single-node-execution-enabled false
+    set_property "${final}/config.properties" experimental.enable-dynamic-filtering \
+      "${DYNAMIC_FILTERING_ENABLED}"
+  fi
   python3 - "${final}/jvm.config" "${COORDINATOR_HEAP_GIB}" <<'PY'
 import sys
 from pathlib import Path
@@ -163,48 +198,76 @@ else
   set_property "${final}/config.properties" http-server.http.port 8080
   set_property "${final}/config.properties" discovery.uri \
     "http://${COORDINATOR_ADDRESS}:8080"
-  set_property "${final}/config.properties" single-node-execution-enabled false
-  set_property "${final}/config.properties" task.max-drivers-per-task \
-    "${TASK_MAX_DRIVERS_PER_TASK}"
-  set_property "${final}/config.properties" system-memory-gb \
-    "${WORKER_SYSTEM_MEMORY_GIB}"
-  set_property "${final}/config.properties" query-memory-gb \
-    "${WORKER_QUERY_MEMORY_GIB}"
-  set_property "${final}/config.properties" query.max-memory-per-node \
-    "${WORKER_QUERY_MEMORY_GIB}GB"
-  set_property "${final}/config.properties" system-mem-limit-gb \
-    "${WORKER_MEMORY_LIMIT_GIB}"
-  set_property "${final}/config.properties" system-mem-shrink-gb \
-    "${WORKER_MEMORY_SHRINK_GIB}"
-  set_property "${final}/config.properties" async-data-cache-enabled \
-    "${ASYNC_DATA_CACHE_ENABLED}"
-  upsert_property "${final}/config.properties" async-cache-ssd-gb \
-    "${ASYNC_CACHE_SSD_GIB}"
-  upsert_property "${final}/config.properties" async-cache-num-shards \
-    "${ASYNC_CACHE_NUM_SHARDS}"
-  upsert_property "${final}/config.properties" runtime-metrics-collection-enabled \
-    true
-  if [[ ${CPU_EXCHANGE_TUNING_ENABLED} == false ]]; then
-    for key in \
-      exchange.http-client.enable-connection-pool \
-      exchange.max-buffer-size \
-      sink.max-buffer-size \
-      exchange.max-response-size \
-      exchange.client-threads \
-      exchange.http-client.max-connections \
-      exchange.http-client.max-connections-per-server \
-      exchange.http-client.max-requests-queued-per-destination \
-      exchange.http-client.request-timeout; do
-      delete_property "${final}/config.properties" "${key}"
-    done
-  fi
-  if ((ASYNC_CACHE_SSD_GIB > 0)); then
-    if [[ -z ${ASYNC_CACHE_SSD_PATH:-} ]]; then
-      echo "ASYNC_CACHE_SSD_PATH is required for SSD cache" >&2
-      exit 2
+  if [[ ${WORKER_ENGINE} == native ]]; then
+    set_property "${final}/config.properties" single-node-execution-enabled false
+    set_property "${final}/config.properties" task.max-drivers-per-task \
+      "${TASK_MAX_DRIVERS_PER_TASK}"
+    set_property "${final}/config.properties" system-memory-gb \
+      "${WORKER_SYSTEM_MEMORY_GIB}"
+    set_property "${final}/config.properties" query-memory-gb \
+      "${WORKER_QUERY_MEMORY_GIB}"
+    set_property "${final}/config.properties" query.max-memory-per-node \
+      "${WORKER_QUERY_MEMORY_GIB}GB"
+    set_property "${final}/config.properties" system-mem-limit-gb \
+      "${WORKER_MEMORY_LIMIT_GIB}"
+    set_property "${final}/config.properties" system-mem-shrink-gb \
+      "${WORKER_MEMORY_SHRINK_GIB}"
+    set_property "${final}/config.properties" async-data-cache-enabled \
+      "${ASYNC_DATA_CACHE_ENABLED}"
+    upsert_property "${final}/config.properties" async-cache-ssd-gb \
+      "${ASYNC_CACHE_SSD_GIB}"
+    upsert_property "${final}/config.properties" async-cache-num-shards \
+      "${ASYNC_CACHE_NUM_SHARDS}"
+    upsert_property "${final}/config.properties" runtime-metrics-collection-enabled \
+      true
+    if [[ ${CPU_EXCHANGE_TUNING_ENABLED} == false ]]; then
+      for key in \
+        exchange.http-client.enable-connection-pool \
+        exchange.max-buffer-size \
+        sink.max-buffer-size \
+        exchange.max-response-size \
+        exchange.client-threads \
+        exchange.http-client.max-connections \
+        exchange.http-client.max-connections-per-server \
+        exchange.http-client.max-requests-queued-per-destination \
+        exchange.http-client.request-timeout; do
+        delete_property "${final}/config.properties" "${key}"
+      done
     fi
-    upsert_property "${final}/config.properties" async-cache-ssd-path \
-      "${ASYNC_CACHE_SSD_PATH}"
+    if ((ASYNC_CACHE_SSD_GIB > 0)); then
+      if [[ -z ${ASYNC_CACHE_SSD_PATH:-} ]]; then
+        echo "ASYNC_CACHE_SSD_PATH is required for SSD cache" >&2
+        exit 2
+      fi
+      upsert_property "${final}/config.properties" async-cache-ssd-path \
+        "${ASYNC_CACHE_SSD_PATH}"
+    fi
+  else
+    upsert_property "${final}/config.properties" query.max-total-memory-per-node \
+      "${COORDINATOR_QUERY_TOTAL_MEMORY_PER_NODE_GIB}GB"
+    upsert_property "${final}/config.properties" query.max-memory-per-node \
+      "${WORKER_QUERY_MEMORY_GIB}GB"
+    upsert_property "${final}/config.properties" memory.heap-headroom-per-node \
+      "${COORDINATOR_HEADROOM_GIB}GB"
+    upsert_property "${final}/config.properties" \
+      experimental.reserved-pool-enabled false
+    upsert_property "${final}/config.properties" experimental.spill-enabled true
+    upsert_property "${final}/config.properties" experimental.spiller-spill-path \
+      /tmp/presto-spill
+    python3 - "${final}/jvm.config" "${WORKER_MEMORY_LIMIT_GIB}" <<'PY'
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+heap = sys.argv[2]
+lines = path.read_text().splitlines()
+lines = [
+    f"-Xmx{heap}G" if line.startswith("-Xmx") else
+    f"-Xms{heap}G" if line.startswith("-Xms") else line
+    for line in lines
+]
+path.write_text("\n".join(lines) + "\n")
+PY
   fi
   set_property "${final}/node.properties" node.id \
     "aws-${RUN_ID}-worker-${WORKER_INDEX}"
@@ -239,7 +302,7 @@ cat >"${history}/tuning.json" <<EOF
 }
 EOF
 
-docker rm -f presto-coordinator presto-native-worker-cpu 2>/dev/null || true
+docker rm -f presto-coordinator presto-native-worker-cpu presto-java-worker 2>/dev/null || true
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 
 if [[ ${ROLE} == coordinator ]]; then
@@ -263,8 +326,14 @@ else
   if ((ASYNC_CACHE_SSD_GIB > 0)); then
     cache_mount_args=(-v /mnt/nvme:/mnt/nvme)
   fi
+  worker_name=presto-native-worker-cpu
+  worker_launcher="${repo}/presto/docker/launch_presto_servers.sh"
+  if [[ ${WORKER_ENGINE} == java ]]; then
+    worker_name=presto-java-worker
+    worker_launcher="${repo}/presto/docker/launch_java_worker.sh"
+  fi
   docker run -d \
-    --name presto-native-worker-cpu \
+    --name "${worker_name}" \
     --network host \
     --restart no \
     --cap-add SYS_NICE \
@@ -276,10 +345,10 @@ else
     -v "${runtime_root}/data:/var/lib/presto/data/local" \
     -v "${runtime_root}/logs:/opt/presto-server/logs" \
     "${cache_mount_args[@]}" \
-    -v "${repo}/presto/docker/launch_presto_servers.sh:/opt/launch_presto_servers.sh:ro" \
+    -v "${worker_launcher}:/opt/launch_worker.sh:ro" \
     --entrypoint bash \
     "${WORKER_IMAGE}" \
-    /opt/launch_presto_servers.sh
+    /opt/launch_worker.sh
 fi
 
 if [[ -f ${runtime_root}/telemetry/${ROLE}.sampler.pid ]]; then

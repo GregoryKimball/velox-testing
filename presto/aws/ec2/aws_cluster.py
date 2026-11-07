@@ -207,6 +207,8 @@ class Cluster:
             positive_int(self.config, key)
         if self.workers not in (1, 2, 8, 16, 32):
             raise ClusterError("worker count must be one of: 1, 2, 8, 16, 32")
+        if self.config.get("WORKER_ENGINE", "native") not in ("native", "java"):
+            raise ClusterError("WORKER_ENGINE must be native or java")
         if not self.run_id.replace("-", "").replace("_", "").isalnum():
             raise ClusterError("RunId may contain only letters, digits, '-' and '_'")
         source_ref = self.config["VELOX_TESTING_REF"]
@@ -370,7 +372,15 @@ class Cluster:
             "--instance-initiated-shutdown-behavior",
             "terminate",
             "--user-data",
-            (f"#!/usr/bin/env bash\nshutdown -h +{positive_int(self.config, 'EXPIRY_HOURS') * 60}\n"),
+            (
+                "#!/usr/bin/env bash\n"
+                "set -eu\n"
+                "if ! snap list amazon-ssm-agent >/dev/null 2>&1; then\n"
+                "  snap install amazon-ssm-agent --classic\n"
+                "fi\n"
+                "systemctl enable --now snap.amazon-ssm-agent.amazon-ssm-agent.service\n"
+                f"shutdown -h +{positive_int(self.config, 'EXPIRY_HOURS') * 60}\n"
+            ),
             "--client-token",
             f"{self.run_id}-{role}",
             "--tag-specifications",
@@ -694,6 +704,9 @@ class Cluster:
             "ASYNC_CACHE_NUM_SHARDS": self.config["ASYNC_CACHE_NUM_SHARDS"],
             "COORDINATOR_IMAGE": self.config["COORDINATOR_IMAGE"],
             "WORKER_IMAGE": self.config["WORKER_IMAGE"],
+            "WORKER_ENGINE": self.config.get("WORKER_ENGINE", "native"),
+            "ICEBERG_WRITER_SORT_BUFFER_SIZE": self.config.get("ICEBERG_WRITER_SORT_BUFFER_SIZE", "64MB"),
+            "ICEBERG_MAX_OPEN_SORT_FILES": self.config.get("ICEBERG_MAX_OPEN_SORT_FILES", "50"),
         }
         return " ".join(f"{key}={shlex.quote(value)}" for key, value in values.items())
 
@@ -768,9 +781,12 @@ class Cluster:
         iterations: int,
         tag: str,
         record_name: str = "benchmark",
+        clear_caches: bool = False,
     ) -> None:
         self.validate(cloud=True)
         coordinator, _ = self.expected_inventory()
+        if clear_caches:
+            self.clear_caches()
         address = coordinator.private_ip or coordinator.private_dns
         result_uri = self.result_uri()
         commands = [
@@ -778,6 +794,7 @@ class Cluster:
             (
                 f"AWS_DEFAULT_REGION={shlex.quote(self.config['AWS_REGION'])} "
                 f"AWS_REGION={shlex.quote(self.config['AWS_REGION'])} "
+                f"PRESTO_CATALOG={shlex.quote(self.config.get('CATALOG_NAME', 'hive'))} "
                 "HOME=/root "
                 "bash /opt/velox-testing/presto/aws/ec2/remote/run_benchmark.sh "
                 f"{shlex.quote(address)} {shlex.quote(self.config['SCHEMA_NAME'])} "
@@ -815,8 +832,32 @@ class Cluster:
 
     def run_cache_series(self, queries: str, tag_prefix: str) -> None:
         self.validate(cloud=True)
-        coordinator, workers = self.expected_inventory()
+        coordinator, _ = self.expected_inventory()
         address = coordinator.private_ip or coordinator.private_dns
+        self.clear_caches()
+        commands = [
+            "set -eu",
+            (
+                f"AWS_DEFAULT_REGION={shlex.quote(self.config['AWS_REGION'])} "
+                f"AWS_REGION={shlex.quote(self.config['AWS_REGION'])} "
+                f"PRESTO_CATALOG={shlex.quote(self.config.get('CATALOG_NAME', 'hive'))} "
+                "HOME=/root "
+                "bash /opt/velox-testing/presto/aws/ec2/remote/run_cache_series.sh "
+                f"{shlex.quote(address)} {shlex.quote(self.config['SCHEMA_NAME'])} "
+                f"{shlex.quote(queries)} {shlex.quote(tag_prefix)} "
+                f"{shlex.quote(self.result_uri())}"
+            ),
+        ]
+        command_id = self.send_command(
+            [coordinator.instance_id],
+            commands,
+            f"cache series {self.run_id}",
+            wait=True,
+        )
+        self.record_command("cache_series", command_id)
+
+    def clear_caches(self) -> None:
+        coordinator, workers = self.expected_inventory()
         instance_ids = [coordinator.instance_id, *[worker.instance_id for worker in workers]]
         drop_command_id = self.send_command(
             instance_ids,
@@ -850,25 +891,6 @@ class Cluster:
                     wait=True,
                 )
                 self.record_command(f"clear_worker_{cache_type}_caches", clear_command_id)
-        commands = [
-            "set -eu",
-            (
-                f"AWS_DEFAULT_REGION={shlex.quote(self.config['AWS_REGION'])} "
-                f"AWS_REGION={shlex.quote(self.config['AWS_REGION'])} "
-                "HOME=/root "
-                "bash /opt/velox-testing/presto/aws/ec2/remote/run_cache_series.sh "
-                f"{shlex.quote(address)} {shlex.quote(self.config['SCHEMA_NAME'])} "
-                f"{shlex.quote(queries)} {shlex.quote(tag_prefix)} "
-                f"{shlex.quote(self.result_uri())}"
-            ),
-        ]
-        command_id = self.send_command(
-            [coordinator.instance_id],
-            commands,
-            f"cache series {self.run_id}",
-            wait=True,
-        )
-        self.record_command("cache_series", command_id)
 
     def collect(self) -> None:
         self.validate(cloud=True)
@@ -1002,6 +1024,7 @@ def build_parser() -> argparse.ArgumentParser:
     run_parser.add_argument("--queries", default="1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21,22")
     run_parser.add_argument("--iterations", type=int, default=5)
     run_parser.add_argument("--tag", default="sf1k_q1q22")
+    run_parser.add_argument("--clear-caches", action="store_true")
     cache_parser = subparsers.add_parser("run-cache-series")
     cache_parser.add_argument(
         "--queries",
@@ -1044,7 +1067,7 @@ def main() -> int:
         elif args.command == "run":
             if args.iterations <= 0:
                 raise ClusterError("--iterations must be greater than zero")
-            cluster.run_benchmark(args.queries, args.iterations, args.tag)
+            cluster.run_benchmark(args.queries, args.iterations, args.tag, clear_caches=args.clear_caches)
         elif args.command == "run-cache-series":
             cluster.run_cache_series(args.queries, args.tag_prefix)
         elif args.command == "run-cold-series":

@@ -16,10 +16,11 @@ sys.path.append(get_abs_file_path(__file__, "../../../benchmark_data_tools"))
 
 
 def get_table_external_location(schema_name, table, presto_cursor):
-    create_table_text = presto_cursor.execute(f"SHOW CREATE TABLE hive.{schema_name}.{table}").fetchone()
+    catalog = os.environ.get("PRESTO_CATALOG", "hive")
+    create_table_text = presto_cursor.execute(f"SHOW CREATE TABLE {catalog}.{schema_name}.{table}").fetchone()
     assert len(create_table_text) == 1
     # Capture everything between two single quotes
-    location_match = re.search(r"external_location = '([^']*)'", create_table_text[0])
+    location_match = re.search(r"\b(?:external_location|location) = '([^']*)'", create_table_text[0])
     location = location_match.group(1) if location_match else ""
     # For remote path
     if location and not location.startswith("file:"):
@@ -35,7 +36,7 @@ def get_table_external_location(schema_name, table, presto_cursor):
         external_dir = f"{os.environ['PRESTO_DATA_DIR']}/{user_match.group(1)}" if user_match else ""
     if not os.path.isdir(external_dir):
         raise Exception(
-            f"External location '{external_dir}' referenced by table hive.{schema_name}.{table} does not exist"
+            f"External location '{external_dir}' referenced by table {catalog}.{schema_name}.{table} does not exist"
         )
     return external_dir
 

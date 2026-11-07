@@ -28,6 +28,8 @@ from .ctas import (
 from .metrics_collector import collect_metrics
 from .run_context import gather_run_context
 
+BENCHMARK_CATALOG = os.environ.get("PRESTO_CATALOG", "hive")
+
 
 def write_query_result(cursor, output_dir, query_id):
     rows = cursor.fetchall()
@@ -117,10 +119,10 @@ def verify_tables_analyzed(request):
     port = request.config.getoption("--port")
     user = request.config.getoption("--user")
     schema = request.config.getoption("--schema-name")
-    conn = prestodb.dbapi.connect(host=hostname, port=port, user=user, catalog="hive", schema=schema)
+    conn = prestodb.dbapi.connect(host=hostname, port=port, user=user, catalog=BENCHMARK_CATALOG, schema=schema)
     cursor = conn.cursor()
     try:
-        check_tables_analyzed(cursor, schema)
+        check_tables_analyzed(cursor, schema, catalog=BENCHMARK_CATALOG)
     except RuntimeError as e:
         pytest.exit(str(e), returncode=1)
     finally:
@@ -134,7 +136,7 @@ def presto_cursor(request):
     port = request.config.getoption("--port")
     user = request.config.getoption("--user")
     schema = request.config.getoption("--schema-name")
-    conn = prestodb.dbapi.connect(host=hostname, port=port, user=user, catalog="hive", schema=schema)
+    conn = prestodb.dbapi.connect(host=hostname, port=port, user=user, catalog=BENCHMARK_CATALOG, schema=schema)
     return conn.cursor()
 
 
