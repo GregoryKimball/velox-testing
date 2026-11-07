@@ -256,6 +256,8 @@ else
     upsert_property "${final}/config.properties" \
       experimental.reserved-pool-enabled false
     upsert_property "${final}/config.properties" experimental.spill-enabled true
+    # Join spilling rejects broadcast joins ("A fixed distribution is required").
+    upsert_property "${final}/config.properties" experimental.join-spill-enabled false
     upsert_property "${final}/config.properties" experimental.spiller-spill-path \
       /tmp/presto-spill
     python3 - "${final}/jvm.config" "${WORKER_MEMORY_LIMIT_GIB}" <<'PY'
