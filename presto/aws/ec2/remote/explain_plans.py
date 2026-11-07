@@ -12,6 +12,7 @@ EXPLAIN ANALYZE output, which executes the query.
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -35,7 +36,13 @@ def main() -> int:
     cursor.execute("SELECT node_version FROM system.runtime.nodes WHERE coordinator")
     (version,) = cursor.fetchone()
     summary = {"coordinator_version": version, "catalog": catalog, "schema": schema, "queries": {}}
+    scale_factor = float(os.environ.get("SCALE_FACTOR", "1000"))
     for name, sql in json.loads(QUERIES.read_text()).items():
+        # Same rewrites as presto/testing/common/fixtures.py applies for benchmark runs.
+        if name == "Q11":
+            sql = sql.format(SF_FRACTION=f"{0.0001 / scale_factor:.12f}")
+        if name == "Q15":
+            sql = sql.replace(" AS supplier_no", "").replace("supplier_no", "l_suppkey")
         entry = summary["queries"].setdefault(name, {})
         try:
             (output_dir / f"{name}.txt").write_text(explain(cursor, f"EXPLAIN (TYPE DISTRIBUTED) {sql}"))
