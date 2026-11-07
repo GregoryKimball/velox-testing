@@ -30,10 +30,12 @@ cp "${runtime_root}"/*.sha256 "${artifact_root}/" 2>/dev/null || true
 cp "${runtime_root}"/*.diff "${artifact_root}/" 2>/dev/null || true
 
 docker ps -a --no-trunc >"${artifact_root}/docker_ps.txt" 2>&1 || true
-docker inspect presto-coordinator presto-native-worker-cpu \
+docker inspect presto-coordinator presto-native-worker-cpu presto-java-worker trino-worker \
   >"${artifact_root}/docker_inspect.json" 2>/dev/null || true
 docker logs presto-coordinator >"${artifact_root}/coordinator_container.log" 2>&1 || true
-docker logs presto-native-worker-cpu >"${artifact_root}/worker_container.log" 2>&1 || true
+for name in presto-native-worker-cpu presto-java-worker trino-worker; do
+  docker logs "${name}" >>"${artifact_root}/worker_container.log" 2>&1 || true
+done
 
 uname -a >"${artifact_root}/uname.txt"
 lscpu --json >"${artifact_root}/lscpu.json"

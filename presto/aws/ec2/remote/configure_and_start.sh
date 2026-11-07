@@ -4,6 +4,10 @@
 
 set -euo pipefail
 
+if [[ ${WORKER_ENGINE:-} == trino ]]; then
+  exec bash "$(dirname "$0")/configure_and_start_trino.sh"
+fi
+
 required=(
   RUN_ID ROLE WORKER_COUNT COORDINATOR_ADDRESS AWS_REGION VCPU_PER_WORKER
   TASK_MAX_DRIVERS_PER_TASK HIVE_MAX_SPLIT_SIZE

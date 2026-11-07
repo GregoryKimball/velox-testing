@@ -215,8 +215,10 @@ class Cluster:
             positive_int(self.config, key)
         if self.workers not in (1, 2, 8, 16, 32):
             raise ClusterError("worker count must be one of: 1, 2, 8, 16, 32")
-        if self.config.get("WORKER_ENGINE", "native") not in ("native", "java"):
-            raise ClusterError("WORKER_ENGINE must be native or java")
+        if self.config.get("WORKER_ENGINE", "native") not in ("native", "java", "trino"):
+            raise ClusterError("WORKER_ENGINE must be native, java or trino")
+        if self.config.get("WORKER_ENGINE") == "trino" and not self.config.get("TRINO_METASTORE_S3_URI"):
+            raise ClusterError("TRINO_METASTORE_S3_URI is required for WORKER_ENGINE=trino")
         if not self.run_id.replace("-", "").replace("_", "").isalnum():
             raise ClusterError("RunId may contain only letters, digits, '-' and '_'")
         source_ref = self.config["VELOX_TESTING_REF"]
@@ -732,6 +734,7 @@ class Cluster:
             "COORDINATOR_IMAGE": self.config["COORDINATOR_IMAGE"],
             "WORKER_IMAGE": self.config["WORKER_IMAGE"],
             "WORKER_ENGINE": self.config.get("WORKER_ENGINE", "native"),
+            "TRINO_METASTORE_S3_URI": self.config.get("TRINO_METASTORE_S3_URI", "-"),
             "ICEBERG_WRITER_SORT_BUFFER_SIZE": self.config.get("ICEBERG_WRITER_SORT_BUFFER_SIZE", "64MB"),
             "ICEBERG_MAX_OPEN_SORT_FILES": self.config.get("ICEBERG_MAX_OPEN_SORT_FILES", "50"),
         }
@@ -950,7 +953,7 @@ class Cluster:
             [coordinator.instance_id, *[item.instance_id for item in workers]],
             [
                 "set -eu",
-                "docker rm -f presto-coordinator presto-native-worker-cpu 2>/dev/null || true",
+                "docker rm -f presto-coordinator presto-native-worker-cpu presto-java-worker trino-worker 2>/dev/null || true",
             ],
             f"stop {self.run_id}",
         )
