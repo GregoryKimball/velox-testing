@@ -306,7 +306,7 @@ cat >"${history}/tuning.json" <<EOF
 }
 EOF
 
-docker rm -f presto-coordinator presto-native-worker-cpu presto-java-worker 2>/dev/null || true
+docker rm -f presto-coordinator presto-native-worker-cpu presto-java-worker trino-worker 2>/dev/null || true
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 
 if [[ ${ROLE} == coordinator ]]; then

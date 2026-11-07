@@ -104,7 +104,7 @@ chown -R 1000:1000 "${runtime_root}/runtime_etc" "${runtime_root}/trino-data"
 find "${final}" -type f -print0 | sort -z | xargs -0 sha256sum \
   >"${runtime_root}/final_config_${ROLE}.sha256"
 
-docker rm -f presto-coordinator trino-worker 2>/dev/null || true
+docker rm -f presto-coordinator presto-native-worker-cpu presto-java-worker trino-worker 2>/dev/null || true
 name=trino-worker
 if [[ ${ROLE} == coordinator ]]; then
   name=presto-coordinator
