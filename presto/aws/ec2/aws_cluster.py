@@ -23,6 +23,14 @@ EXPERIMENT_TAG = "20260824_aws_102"
 DEFAULT_STATE_ROOT = Path.home() / ".cache" / "velox-testing" / "aws-ec2"
 
 
+SPOT_CAPACITY_ERRORS = (
+    "InsufficientInstanceCapacity",
+    "SpotMaxPriceTooLow",
+    "MaxSpotInstanceCountExceeded",
+    "capacity-not-available",
+)
+
+
 class ClusterError(RuntimeError):
     """A user-actionable cluster orchestration failure."""
 
@@ -335,6 +343,17 @@ class Cluster:
         return nonzero[0]
 
     def launch_role(self, role: str, count: int, expiry: str, ami_id: str) -> list[str]:
+        if self.config.get("SPOT", "false") != "true":
+            return self.launch_role_market(role, count, expiry, ami_id, spot=False)
+        try:
+            return self.launch_role_market(role, count, expiry, ami_id, spot=True)
+        except ClusterError as error:
+            if not any(code in str(error) for code in SPOT_CAPACITY_ERRORS):
+                raise
+            print(f"no spot capacity for {role}; launching on-demand", file=sys.stderr)
+            return self.launch_role_market(role, count, expiry, ami_id, spot=False)
+
+    def launch_role_market(self, role: str, count: int, expiry: str, ami_id: str, spot: bool) -> list[str]:
         instance_type = self.config["COORDINATOR_INSTANCE_TYPE" if role == "coordinator" else "WORKER_INSTANCE_TYPE"]
         mappings = [
             {
@@ -382,10 +401,18 @@ class Cluster:
                 f"shutdown -h +{positive_int(self.config, 'EXPIRY_HOURS') * 60}\n"
             ),
             "--client-token",
-            f"{self.run_id}-{role}",
+            f"{self.run_id}-{role}-{'spot' if spot else 'od'}",
             "--tag-specifications",
             json.dumps(tag_specifications, separators=(",", ":")),
         ]
+        if spot:
+            args += [
+                "--instance-market-options",
+                json.dumps(
+                    {"MarketType": "spot", "SpotOptions": {"SpotInstanceType": "one-time"}},
+                    separators=(",", ":"),
+                ),
+            ]
         if self.config.get("PLACEMENT_GROUP"):
             args += ["--placement", f"GroupName={self.config['PLACEMENT_GROUP']}"]
         response = self.aws.run(args, json_output=True)
