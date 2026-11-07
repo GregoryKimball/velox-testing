@@ -797,6 +797,7 @@ class Cluster:
             [
                 "set -eu",
                 (
+                    f"WORKER_ENGINE={shlex.quote(self.config.get('WORKER_ENGINE', 'native'))} "
                     "bash /opt/velox-testing/presto/aws/ec2/remote/"
                     f"wait_for_cluster.sh {shlex.quote(address)} {self.workers} {timeout}"
                 ),

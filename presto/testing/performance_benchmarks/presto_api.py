@@ -7,11 +7,14 @@ from typing import Any
 
 import requests
 
+# Trino rejects REST calls without a user; Presto ignores the header.
+HEADERS = {"X-Trino-User": "benchmark", "X-Presto-User": "benchmark"}
+
 
 def fetch_json(url: str, timeout: int = 10) -> Any | None:
     """Fetch JSON from a URL, returning None on error."""
     try:
-        response = requests.get(url, timeout=timeout)
+        response = requests.get(url, timeout=timeout, headers=HEADERS)
         response.raise_for_status()
         return response.json()
     except Exception as e:
@@ -22,7 +25,7 @@ def fetch_json(url: str, timeout: int = 10) -> Any | None:
 def fetch_text(url: str, timeout: int = 10) -> str | None:
     """Fetch text from a URL, returning None on error."""
     try:
-        response = requests.get(url, timeout=timeout)
+        response = requests.get(url, timeout=timeout, headers=HEADERS)
         response.raise_for_status()
         return response.text
     except Exception as e:
