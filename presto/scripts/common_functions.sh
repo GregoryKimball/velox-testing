@@ -31,8 +31,11 @@ function wait_for_worker_node_registration() {
   echo "Coordinator URL: $COORDINATOR_URL"
   local -r MAX_RETRIES=12
   local retry_count=0
-  until curl -s -f -o node_response.json ${COORDINATOR_URL}/v1/node && \
-        (( $(jq length node_response.json) > 0 )); do
+  until { curl -s -f -o node_response.json ${COORDINATOR_URL}/v1/node && \
+          (( $(jq length node_response.json) > 0 )); } || \
+        # Trino has no /v1/node; an ACTIVE Trino coordinator is ready to schedule.
+        { [[ $(curl -s -o /dev/null -w '%{http_code}' ${COORDINATOR_URL}/v1/node) == 404 ]] && \
+          [[ $(curl -s ${COORDINATOR_URL}/v1/info/state) == '"ACTIVE"' ]]; }; do
     if (( $retry_count >= $MAX_RETRIES )); then
       echo "Error: Worker node not registered after 60s. Exiting."
       exit 1

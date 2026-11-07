@@ -15,7 +15,7 @@ from pathlib import Path
 import prestodb
 
 from ..common import test_utils
-from .presto_api import get_cluster_tag, get_nodes
+from .presto_api import get_cluster_tag, get_nodes, is_trino
 
 # Enabled by run_benchmark.sh --verbose (sets PRESTO_BENCHMARK_DEBUG=1)
 _DEBUG = os.environ.get("PRESTO_BENCHMARK_DEBUG", "") == "1" or os.environ.get("DEBUG", "") == "1"
@@ -30,10 +30,28 @@ def _get_node_count(hostname: str, port: int) -> int | None:
     """Return number of nodes in the Presto /v1/node list (workers only; coordinator not listed)."""
     nodes = get_nodes(hostname, port)
     if nodes is None:
-        return None
+        return _get_trino_worker_count(hostname, port) if is_trino(hostname, port) else None
     n = len(nodes)
     _debug(f"get_node_count: {n} node(s)")
     return n
+
+
+def _get_trino_worker_count(hostname: str, port: int) -> int | None:
+    conn = None
+    try:
+        conn = prestodb.dbapi.connect(host=hostname, port=port, user="benchmark", catalog="system", schema="runtime")
+        rows = (
+            conn.cursor()
+            .execute("SELECT count(*) FROM system.runtime.nodes WHERE NOT coordinator AND state = 'active'")
+            .fetchall()
+        )
+        return int(rows[0][0])
+    except Exception as e:
+        _debug(f"trino worker count lookup failed: {e}")
+        return None
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 _SAFE_IDENTIFIER_RE = re.compile(r"^[a-zA-Z0-9_]+$")
@@ -161,6 +179,8 @@ def _get_engine(hostname: str, port: int) -> str:
     unrecognised.
     """
     tag = get_cluster_tag(hostname, port)
+    if tag is None and is_trino(hostname, port):
+        return "trino"
     if tag is None:
         raise RuntimeError(
             "Could not determine worker engine: cluster-tag is not set on the "
@@ -251,7 +271,7 @@ def gather_run_context(
     elif engine == "presto-velox-cpu":
         ctx["gpu_count"] = 0
         ctx["gpu_name"] = "NA"
-    elif engine == "presto-java":
+    elif engine in ("presto-java", "trino"):
         ctx["gpu_count"] = 0
         ctx["gpu_name"] = "NA"
 

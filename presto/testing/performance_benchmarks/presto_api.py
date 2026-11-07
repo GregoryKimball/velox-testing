@@ -49,6 +49,16 @@ def get_cluster_tag(hostname: str, port: int) -> str | None:
     return tag
 
 
+def is_trino(hostname: str, port: int) -> bool:
+    """Trino serves /v1/info but has no /v1/node endpoint."""
+    try:
+        info = requests.get(f"http://{hostname}:{port}/v1/info", timeout=10, headers=HEADERS)
+        node = requests.get(f"http://{hostname}:{port}/v1/node", timeout=10, headers=HEADERS)
+    except Exception:
+        return False
+    return info.ok and node.status_code == 404
+
+
 def get_nodes(hostname: str, port: int) -> list | None:
     """Fetch the worker node list from Presto's /v1/node endpoint.
 
