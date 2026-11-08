@@ -152,6 +152,8 @@ class Cluster:
         self.config = config
         self.run_id = run_id
         self.workers = workers
+        self.experiment = config.get("EXPERIMENT_TAG") or EXPERIMENT_TAG
+        self.gpu = config.get("WORKER_ENGINE") == "gpu"
         self.state_dir = state_root / run_id
         self.aws = Aws(config, dry_run=dry_run)
         self.dry_run = dry_run
@@ -215,8 +217,8 @@ class Cluster:
             positive_int(self.config, key)
         if self.workers not in (1, 2, 8, 16, 32):
             raise ClusterError("worker count must be one of: 1, 2, 8, 16, 32")
-        if self.config.get("WORKER_ENGINE", "native") not in ("native", "java", "trino"):
-            raise ClusterError("WORKER_ENGINE must be native, java or trino")
+        if self.config.get("WORKER_ENGINE", "native") not in ("native", "java", "trino", "gpu"):
+            raise ClusterError("WORKER_ENGINE must be native, java, trino or gpu")
         if self.config.get("WORKER_ENGINE") == "trino" and not self.config.get("TRINO_METASTORE_S3_URI"):
             raise ClusterError("TRINO_METASTORE_S3_URI is required for WORKER_ENGINE=trino")
         if not self.run_id.replace("-", "").replace("_", "").isalnum():
@@ -268,15 +270,18 @@ class Cluster:
             )
 
     def tags(self, role: str, expiry: str) -> list[dict[str, str]]:
-        return [
-            {"Key": "Name", "Value": f"presto-cpu-{role}-{self.run_id}"},
+        tags = [
+            {"Key": "Name", "Value": f"presto-{'gpu' if self.gpu else 'cpu'}-{role}-{self.run_id}"},
             {"Key": "Project", "Value": PROJECT_TAG},
-            {"Key": "Experiment", "Value": EXPERIMENT_TAG},
+            {"Key": "Experiment", "Value": self.experiment},
             {"Key": "RunId", "Value": self.run_id},
             {"Key": "Role", "Value": role},
             {"Key": "Owner", "Value": self.config["OWNER"]},
             {"Key": "ExpiresAt", "Value": expiry},
         ]
+        if self.config.get("EXPERIMENT_TAG"):
+            tags.append({"Key": "project", "Value": self.experiment})
+        return tags
 
     def resolve_ami(self, role: str) -> str:
         role_prefix = role.upper()
@@ -482,7 +487,7 @@ class Cluster:
                 "describe-instances",
                 "--filters",
                 f"Name=tag:Project,Values={PROJECT_TAG}",
-                f"Name=tag:Experiment,Values={EXPERIMENT_TAG}",
+                f"Name=tag:Experiment,Values={self.experiment}",
                 f"Name=tag:RunId,Values={self.run_id}",
                 f"Name=tag:Owner,Values={self.config['OWNER']}",
                 "Name=instance-state-name,Values=pending,running,stopping,stopped",
@@ -650,7 +655,9 @@ class Cluster:
             "set -eu",
             "export DEBIAN_FRONTEND=noninteractive",
             "apt-get update -y",
-            ("apt-get install -y ca-certificates curl docker.io git jq numactl python3 python3-venv unzip"),
+            ("apt-get install -y ca-certificates curl git jq numactl python3 python3-venv unzip zstd"),
+            # GPU AMIs ship docker-ce with the NVIDIA runtime; docker.io would replace it.
+            "command -v docker >/dev/null || apt-get install -y docker.io",
             "systemctl enable --now docker",
             (
                 "if ! command -v aws >/dev/null; then "
@@ -687,6 +694,10 @@ class Cluster:
             + shlex.quote(self.config["WORKER_IMAGE"])
             + " "
             + shlex.quote(self.config["HIVE_METASTORE_S3_URI"])
+            + " "
+            + shlex.quote(self.config.get("COORDINATOR_IMAGE_S3_URI", "") or "-")
+            + " "
+            + shlex.quote(self.config.get("WORKER_IMAGE_S3_URI", "") or "-")
         )
         coordinator_command_id = self.send_command(
             [coordinator.instance_id],
@@ -738,6 +749,7 @@ class Cluster:
             "ICEBERG_WRITER_SORT_BUFFER_SIZE": self.config.get("ICEBERG_WRITER_SORT_BUFFER_SIZE", "64MB"),
             "ICEBERG_MAX_OPEN_SORT_FILES": self.config.get("ICEBERG_MAX_OPEN_SORT_FILES", "50"),
         }
+        values.update({key: value for key, value in self.config.items() if key.startswith("GPU_")})
         return " ".join(f"{key}={shlex.quote(value)}" for key, value in values.items())
 
     def start(self) -> None:
@@ -975,7 +987,7 @@ class Cluster:
             [coordinator.instance_id, *[item.instance_id for item in workers]],
             [
                 "set -eu",
-                "docker rm -f presto-coordinator presto-native-worker-cpu presto-java-worker trino-worker 2>/dev/null || true",
+                "docker rm -f presto-coordinator presto-native-worker-cpu presto-native-worker-gpu presto-java-worker trino-worker 2>/dev/null || true",
             ],
             f"stop {self.run_id}",
         )
@@ -999,7 +1011,7 @@ class Cluster:
                 "describe-instances",
                 "--filters",
                 f"Name=tag:Project,Values={PROJECT_TAG}",
-                f"Name=tag:Experiment,Values={EXPERIMENT_TAG}",
+                f"Name=tag:Experiment,Values={self.experiment}",
                 "Name=instance-state-name,Values=pending,running,stopping,stopped",
             ],
             json_output=True,

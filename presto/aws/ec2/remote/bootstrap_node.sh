@@ -4,8 +4,9 @@
 
 set -euo pipefail
 
-if [[ $# -ne 4 ]]; then
-  echo "usage: bootstrap_node.sh <role> <coordinator-image> <worker-image> <metastore-s3-uri>" >&2
+if [[ $# -ne 4 && $# -ne 6 ]]; then
+  echo "usage: bootstrap_node.sh <role> <coordinator-image> <worker-image> <metastore-s3-uri>" \
+    "[<coordinator-image-s3-uri|-> <worker-image-s3-uri|->]" >&2
   exit 2
 fi
 
@@ -13,6 +14,8 @@ role=$1
 coordinator_image=$2
 worker_image=$3
 metastore_uri=$4
+coordinator_image_uri=${5:--}
+worker_image_uri=${6:--}
 runtime_root=/opt/presto-aws
 
 if [[ ${role} != coordinator && ${role} != worker ]]; then
@@ -32,11 +35,23 @@ python3 -m venv "${runtime_root}/venv"
 "${runtime_root}/venv/bin/pip" install --disable-pip-version-check \
   -r /opt/velox-testing/presto/testing/requirements.txt
 
+# An image archive (docker save | zstd) is loaded instead of pulled; the image
+# reference is then a local tag that the archive must provide.
+fetch_image() {
+  local image=$1 uri=$2
+  if [[ ${uri} == - ]]; then
+    docker pull "${image}"
+  elif ! docker image inspect "${image}" >/dev/null 2>&1; then
+    aws s3 cp "${uri}" - --only-show-errors | zstd -dc | docker load
+    docker image inspect "${image}" >/dev/null
+  fi
+}
+
 if [[ ${role} == coordinator ]]; then
-  docker pull "${coordinator_image}"
+  fetch_image "${coordinator_image}" "${coordinator_image_uri}"
   local_image=${coordinator_image}
 else
-  docker pull "${worker_image}"
+  fetch_image "${worker_image}" "${worker_image_uri}"
   local_image=${worker_image}
 fi
 
