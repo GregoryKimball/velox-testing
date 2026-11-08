@@ -294,6 +294,10 @@ else
       fi
       upsert_property "${final}/catalog/hive.properties" cudf.hive.use-buffered-input \
         "${GPU_USE_BUFFERED_INPUT:-false}"
+      upsert_property "${final}/catalog/hive.properties" parquet.reader.chunk-read-limit \
+        "${GPU_PARQUET_CHUNK_READ_LIMIT:-0}"
+      upsert_property "${final}/catalog/hive.properties" parquet.reader.pass-read-limit \
+        "${GPU_PARQUET_PASS_READ_LIMIT:-0}"
     fi
   else
     upsert_property "${final}/config.properties" query.max-total-memory-per-node \
