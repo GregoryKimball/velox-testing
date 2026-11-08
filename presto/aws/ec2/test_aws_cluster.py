@@ -140,6 +140,7 @@ class ClusterTest(unittest.TestCase):
         config = valid_config()
         config["WORKER_EFA"] = "true"
         config["WORKER_PLACEMENT_GROUP"] = "workers-pg"
+        config["WORKER_EFA_SECURITY_GROUP_ID"] = "sg-efa"
         output = io.StringIO()
         with contextlib.redirect_stdout(output):
             self.make_cluster(config).launch()
@@ -148,6 +149,7 @@ class ClusterTest(unittest.TestCase):
         self.assertNotIn("efa", coordinator)
         self.assertNotIn("workers-pg", coordinator)
         self.assertIn('"InterfaceType":"efa"', worker)
+        self.assertIn('"sg-efa"', worker)
         self.assertNotIn("--subnet-id", worker)
         self.assertIn("GroupName=workers-pg", worker)
 

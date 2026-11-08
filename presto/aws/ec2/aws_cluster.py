@@ -391,7 +391,9 @@ class Cluster:
                 "DeviceIndex": 0,
                 "InterfaceType": "efa",
                 "SubnetId": self.config["SUBNET_ID"],
-                "Groups": [self.config["SECURITY_GROUP_ID"]],
+                # EFA OS-bypass traffic needs a group that allows all traffic to and from itself.
+                "Groups": [self.config["SECURITY_GROUP_ID"]]
+                + ([self.config["WORKER_EFA_SECURITY_GROUP_ID"]] if self.config.get("WORKER_EFA_SECURITY_GROUP_ID") else []),
                 "DeleteOnTermination": True,
             }
             args += ["--network-interfaces", json.dumps([interface], separators=(",", ":"))]
