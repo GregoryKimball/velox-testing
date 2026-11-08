@@ -200,8 +200,8 @@ if [[ ${ROLE} == coordinator ]]; then
 session-property-config.configuration-manager=file
 session-property-manager.config-file=/opt/presto-server/etc/session-property-config.json
 EOF
-    printf '%s\n' '[{"sessionProperties":{"native_cudf_exchange_enabled":"true"}}]' \
-      >"${final}/session-property-config.json"
+    printf '[{"sessionProperties":{"native_cudf_exchange_enabled":"%s"}}]\n' \
+      "${GPU_UCX_EXCHANGE:-true}" >"${final}/session-property-config.json"
   fi
   python3 - "${final}/jvm.config" "${COORDINATOR_HEAP_GIB}" <<'PY'
 import sys
@@ -270,7 +270,7 @@ else
       gpu_batch_rows=${GPU_BATCH_ROWS:-30000000}
       for property in \
         cudf.enabled=true \
-        cudf.exchange=true \
+        "cudf.exchange=${GPU_UCX_EXCHANGE:-true}" \
         cudf.exchange.server.port=8083 \
         "cudf.memory_resource=${GPU_CUDF_MEMORY_RESOURCE:-async}" \
         cudf.jit_expression_enabled=false \
