@@ -215,8 +215,8 @@ class Cluster:
             "WORKER_MEMORY_SHRINK_GIB",
         ):
             positive_int(self.config, key)
-        if self.workers not in (1, 2, 3, 4, 8, 16, 32):
-            raise ClusterError("worker count must be one of: 1, 2, 3, 4, 8, 16, 32")
+        if self.workers not in (1, 2, 3, 4, 8, 12, 16, 32):
+            raise ClusterError("worker count must be one of: 1, 2, 3, 4, 8, 12, 16, 32")
         if self.config.get("WORKER_ENGINE", "native") not in ("native", "java", "trino", "gpu"):
             raise ClusterError("WORKER_ENGINE must be native, java, trino or gpu")
         if self.config.get("WORKER_ENGINE") == "trino" and not self.config.get("TRINO_METASTORE_S3_URI"):

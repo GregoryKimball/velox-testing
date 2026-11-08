@@ -89,7 +89,7 @@ class ClusterTest(unittest.TestCase):
         )
 
     def test_validation_accepts_supported_shapes(self) -> None:
-        for workers in (1, 2, 3, 4, 8, 16, 32):
+        for workers in (1, 2, 3, 4, 8, 12, 16, 32):
             self.make_cluster(workers=workers).validate()
 
     def test_validation_accepts_role_specific_amis(self) -> None:
