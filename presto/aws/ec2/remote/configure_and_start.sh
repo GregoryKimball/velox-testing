@@ -298,6 +298,12 @@ else
         "${GPU_PARQUET_CHUNK_READ_LIMIT:-0}"
       upsert_property "${final}/catalog/hive.properties" parquet.reader.pass-read-limit \
         "${GPU_PARQUET_PASS_READ_LIMIT:-0}"
+      # Semicolon-separated key=value pairs added to the worker config.properties.
+      IFS=';' read -r -a extra_properties <<<"${GPU_EXTRA_CONFIG:-}"
+      for property in "${extra_properties[@]}"; do
+        [[ -n ${property} ]] || continue
+        upsert_property "${final}/config.properties" "${property%%=*}" "${property#*=}"
+      done
     fi
   else
     upsert_property "${final}/config.properties" query.max-total-memory-per-node \
