@@ -389,6 +389,7 @@ else
     worker_launcher="${repo}/presto/docker/launch_java_worker.sh"
   elif [[ ${WORKER_ENGINE} == gpu ]]; then
     worker_name=presto-native-worker-gpu
+    worker_launcher="${repo}/presto/aws/ec2/remote/gpu_worker_entry.sh"
     # Host networking also exposes docker0 and other interfaces that peers cannot
     # reach, so UCX is restricted to the primary NIC. Over TCP, UCX must ask the
     # CUDA driver for each pointer's memory type (UCX_MEMTYPE_CACHE=n); otherwise
@@ -399,6 +400,9 @@ else
       --gpus all
       --shm-size 16g
       --ulimit memlock=-1
+      -v "${repo}/presto/docker/launch_presto_servers.sh:/opt/launch_presto_servers.sh:ro"
+      -e "GPU_S3_CREDENTIALS=${GPU_S3_CREDENTIALS:-none}"
+      -e "GPU_NUMA_BIND=${GPU_NUMA_BIND:-true}"
       -e CUDA_VISIBLE_DEVICES=0
       -e "LD_LIBRARY_PATH=${ucx_root}/lib:${ucx_root}/lib/ucx:/usr/lib64/presto-native-libs:/usr/local/cuda/lib64:/usr/local/lib"
       -e "UCX_MODULE_DIR=${ucx_root}/lib/ucx"
