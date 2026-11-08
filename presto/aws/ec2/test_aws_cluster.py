@@ -89,7 +89,7 @@ class ClusterTest(unittest.TestCase):
         )
 
     def test_validation_accepts_supported_shapes(self) -> None:
-        for workers in (1, 2, 8, 16, 32):
+        for workers in (1, 2, 3, 8, 16, 32):
             self.make_cluster(workers=workers).validate()
 
     def test_validation_accepts_role_specific_amis(self) -> None:
@@ -104,7 +104,7 @@ class ClusterTest(unittest.TestCase):
 
     def test_validation_rejects_unplanned_shape(self) -> None:
         with self.assertRaisesRegex(aws_cluster.ClusterError, "worker count"):
-            self.make_cluster(workers=3).validate()
+            self.make_cluster(workers=5).validate()
 
     def test_validation_rejects_unsafe_worker_memory(self) -> None:
         config = valid_config()
