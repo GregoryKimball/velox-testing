@@ -415,6 +415,7 @@ else
       -e UCX_TCP_KEEPINTVL=1ms
       -e UCX_WARN_UNUSED_ENV_VARS=n
       -e UCX_LOG_LEVEL=info
+      -e GLOG_logtostderr=1
       -e "KVIKIO_NTHREADS=${GPU_KVIKIO_NTHREADS:-64}"
       -e "LIBCUDF_KERNEL_CACHE_PATH=/var/lib/presto/data/local/libcudf-cache"
     )
