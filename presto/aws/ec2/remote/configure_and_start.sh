@@ -433,6 +433,11 @@ else
       -e "KVIKIO_NTHREADS=${GPU_KVIKIO_NTHREADS:-64}"
       -e "LIBCUDF_KERNEL_CACHE_PATH=/var/lib/presto/data/local/libcudf-cache"
     )
+    # Semicolon-separated NAME=value pairs added to the GPU worker container environment.
+    IFS=';' read -r -a extra_env <<<"${GPU_EXTRA_ENV:-}"
+    for variable in "${extra_env[@]}"; do
+      [[ -n ${variable} ]] && gpu_args+=(-e "${variable}")
+    done
   fi
   docker run -d \
     --name "${worker_name}" \
