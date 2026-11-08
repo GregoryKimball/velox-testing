@@ -405,6 +405,19 @@ else
     # CUDA driver for each pointer's memory type (UCX_MEMTYPE_CACHE=n); otherwise
     # it treats RMM buffers as host memory and send() fails with EIO.
     nic=$(ip route get 8.8.8.8 | awk '{for (i = 1; i < NF; i++) if ($i == "dev") print $(i + 1)}')
+    ucx_devices=${nic}
+    efa_args=()
+    if [[ ${GPU_EFA:-false} == true ]]; then
+      efa_device=$(ls /sys/class/infiniband 2>/dev/null | head -1)
+      if [[ -z ${efa_device} ]]; then
+        echo "GPU_EFA=true but no EFA device under /sys/class/infiniband" >&2
+        exit 2
+      fi
+      ucx_devices="${efa_device}:1,${nic}"
+      for device in /dev/infiniband/*; do
+        efa_args+=(--device "${device}")
+      done
+    fi
     ucx_root=/opt/presto-ucx/1.22.0
     gpu_args=(
       --gpus all
@@ -417,7 +430,8 @@ else
       -e "LD_LIBRARY_PATH=${ucx_root}/lib:${ucx_root}/lib/ucx:/usr/lib64/presto-native-libs:/usr/local/cuda/lib64:/usr/local/lib"
       -e "UCX_MODULE_DIR=${ucx_root}/lib/ucx"
       -e "UCX_TLS=${GPU_UCX_TLS:-tcp,cuda_copy}"
-      -e "UCX_NET_DEVICES=${nic}"
+      "${efa_args[@]}"
+      -e "UCX_NET_DEVICES=${ucx_devices}"
       -e UCX_MEMTYPE_CACHE=n
       -e UCX_RNDV_FRAG_MEM_TYPES=host
       -e UCX_CUDA_COPY_DMABUF=no

@@ -385,10 +385,24 @@ class Cluster:
             instance_type,
             "--count",
             str(count),
-            "--subnet-id",
-            self.config["SUBNET_ID"],
-            "--security-group-ids",
-            self.config["SECURITY_GROUP_ID"],
+        ]
+        if role == "worker" and self.config.get("WORKER_EFA", "false") == "true":
+            interface = {
+                "DeviceIndex": 0,
+                "InterfaceType": "efa",
+                "SubnetId": self.config["SUBNET_ID"],
+                "Groups": [self.config["SECURITY_GROUP_ID"]],
+                "DeleteOnTermination": True,
+            }
+            args += ["--network-interfaces", json.dumps([interface], separators=(",", ":"))]
+        else:
+            args += [
+                "--subnet-id",
+                self.config["SUBNET_ID"],
+                "--security-group-ids",
+                self.config["SECURITY_GROUP_ID"],
+            ]
+        args += [
             "--iam-instance-profile",
             f"Name={self.config['IAM_INSTANCE_PROFILE']}",
             "--metadata-options",
@@ -420,8 +434,11 @@ class Cluster:
                     separators=(",", ":"),
                 ),
             ]
-        if self.config.get("PLACEMENT_GROUP"):
-            args += ["--placement", f"GroupName={self.config['PLACEMENT_GROUP']}"]
+        placement_group = self.config.get("PLACEMENT_GROUP")
+        if role == "worker" and self.config.get("WORKER_PLACEMENT_GROUP"):
+            placement_group = self.config["WORKER_PLACEMENT_GROUP"]
+        if placement_group:
+            args += ["--placement", f"GroupName={placement_group}"]
         response = self.aws.run(args, json_output=True)
         if self.dry_run:
             return []

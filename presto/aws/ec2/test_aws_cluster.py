@@ -136,6 +136,21 @@ class ClusterTest(unittest.TestCase):
         self.assertIn("HttpTokens=required", rendered)
         self.assertNotIn("terminate-instances", rendered)
 
+    def test_launch_dry_run_gives_only_workers_efa_and_worker_placement_group(self) -> None:
+        config = valid_config()
+        config["WORKER_EFA"] = "true"
+        config["WORKER_PLACEMENT_GROUP"] = "workers-pg"
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            self.make_cluster(config).launch()
+        coordinator, worker = output.getvalue().split("ec2 run-instances")[1:3]
+        self.assertIn("--subnet-id", coordinator)
+        self.assertNotIn("efa", coordinator)
+        self.assertNotIn("workers-pg", coordinator)
+        self.assertIn('"InterfaceType":"efa"', worker)
+        self.assertNotIn("--subnet-id", worker)
+        self.assertIn("GroupName=workers-pg", worker)
+
     def test_tags_scope_resources_to_run(self) -> None:
         tags = {item["Key"]: item["Value"] for item in self.make_cluster().tags("worker", "2026-08-25T00:00:00+00:00")}
         self.assertEqual(tags["Project"], "cudf-performance")
