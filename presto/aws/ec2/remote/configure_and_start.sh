@@ -415,7 +415,7 @@ else
       fi
       ucx_devices="${efa_device}:1,${nic}"
       for device in /dev/infiniband/*; do
-        efa_args+=(--device "${device}")
+        [[ -c ${device} ]] && efa_args+=(--device "${device}")
       done
     fi
     ucx_root=/opt/presto-ucx/1.22.0
