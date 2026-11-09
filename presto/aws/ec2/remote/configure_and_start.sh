@@ -279,6 +279,7 @@ else
         "cudf.batch_size_min_threshold=${gpu_batch_rows}" \
         "driver.max-split-preload=${GPU_SPLIT_PRELOAD:-2}" \
         ucxx.blocking_polling=false \
+        ucxx.blocking_progress=false \
         ucxx.error_handling=false; do
         upsert_property "${final}/config.properties" "${property%%=*}" "${property#*=}"
       done
