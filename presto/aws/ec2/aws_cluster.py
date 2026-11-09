@@ -576,6 +576,12 @@ class Cluster:
         *,
         wait: bool = True,
     ) -> str:
+        # SSM SendCommand accepts at most 50 instance IDs per call.
+        if len(instance_ids) > 50:
+            return ",".join(
+                self.send_command(instance_ids[start : start + 50], commands, comment, wait=wait)
+                for start in range(0, len(instance_ids), 50)
+            )
         execution_timeout = positive_int(self.config, "SSM_COMMAND_TIMEOUT_SECONDS")
         parameters = json.dumps(
             {
