@@ -264,6 +264,9 @@ else
       fi
       upsert_property "${final}/config.properties" async-cache-ssd-path \
         "${ASYNC_CACHE_SSD_PATH}"
+      if [[ ${ASYNC_CACHE_SSD_ODIRECT:-true} == false ]]; then
+        upsert_property "${final}/config.properties" gflag.velox-ssd-odirect false
+      fi
     fi
     if [[ ${WORKER_ENGINE} == gpu ]]; then
       # The UCX exchange listens on the HTTP port + 3; peers derive it from the task URI.

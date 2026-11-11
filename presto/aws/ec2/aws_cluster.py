@@ -771,6 +771,7 @@ class Cluster:
             "ASYNC_CACHE_SSD_GIB": self.config["ASYNC_CACHE_SSD_GIB"],
             "ASYNC_CACHE_SSD_PATH": self.config.get("ASYNC_CACHE_SSD_PATH", ""),
             "ASYNC_CACHE_NUM_SHARDS": self.config["ASYNC_CACHE_NUM_SHARDS"],
+            "ASYNC_CACHE_SSD_ODIRECT": self.config.get("ASYNC_CACHE_SSD_ODIRECT", "true"),
             "COORDINATOR_IMAGE": self.config["COORDINATOR_IMAGE"],
             "WORKER_IMAGE": self.config["WORKER_IMAGE"],
             "WORKER_ENGINE": self.config.get("WORKER_ENGINE", "native"),
