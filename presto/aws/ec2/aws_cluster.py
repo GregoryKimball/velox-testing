@@ -372,6 +372,10 @@ class Cluster:
                 },
             }
         ]
+        if role == "worker":
+            for key, field in (("WORKER_ROOT_VOLUME_IOPS", "Iops"), ("WORKER_ROOT_VOLUME_THROUGHPUT_MIBPS", "Throughput")):
+                if self.config.get(key):
+                    mappings[0]["Ebs"][field] = positive_int(self.config, key)
         tag_specifications = [
             {"ResourceType": "instance", "Tags": self.tags(role, expiry)},
             {"ResourceType": "volume", "Tags": self.tags(role, expiry)},
@@ -783,19 +787,25 @@ class Cluster:
         address = coordinator.private_ip or coordinator.private_dns
         if nonnegative_int(self.config, "ASYNC_CACHE_SSD_GIB"):
             cache_path = shlex.quote(self.config["ASYNC_CACHE_SSD_PATH"])
+            # ASYNC_CACHE_SSD_DEVICE=root keeps the SSD cache on the EBS root volume, for instances without
+            # instance storage.
+            mount_nvme = [] if self.config.get("ASYNC_CACHE_SSD_DEVICE", "instance-store") == "root" else [
+                (
+                    "device=$(lsblk -dpno NAME,MODEL | "
+                    "awk '$0 ~ /Amazon EC2 NVMe Instance Storage/ {print $1; exit}'); "
+                    "test -n \"$device\"; test -b \"$device\"; "
+                    "if ! blkid \"$device\" >/dev/null 2>&1; then "
+                    "mkfs.ext4 -F \"$device\"; fi"
+                ),
+                "mkdir -p /mnt/nvme",
+                "mountpoint -q /mnt/nvme || mount \"$device\" /mnt/nvme",
+            ]
             prepare_command_id = self.send_command(
                 [worker.instance_id for worker in workers],
                 [
                     "set -eu",
-                    (
-                        "device=$(lsblk -dpno NAME,MODEL | "
-                        "awk '$0 ~ /Amazon EC2 NVMe Instance Storage/ {print $1; exit}'); "
-                        "test -n \"$device\"; test -b \"$device\"; "
-                        "if ! blkid \"$device\" >/dev/null 2>&1; then "
-                        "mkfs.ext4 -F \"$device\"; fi"
-                    ),
+                    *mount_nvme,
                     "mkdir -p /mnt/nvme",
-                    "mountpoint -q /mnt/nvme || mount \"$device\" /mnt/nvme",
                     f"mkdir -p {cache_path}",
                     f"chmod 0777 /mnt/nvme {cache_path}",
                 ],
