@@ -462,6 +462,7 @@ else
     --network host \
     --restart no \
     --cap-add SYS_NICE \
+    --ulimit nofile=524288:524288 \
     -e "AWS_DEFAULT_REGION=${AWS_REGION}" \
     -e "AWS_REGION=${AWS_REGION}" \
     -e "SERVER_START_TIMESTAMP=${timestamp}" \
