@@ -741,6 +741,12 @@ class Cluster:
         )
         self.record_command("bootstrap_workers", worker_command_id)
 
+    def presto_workers(self) -> int:
+        """Presto workers in the cluster: one per worker instance, or one per GPU with GPU_WORKERS_PER_INSTANCE."""
+        if self.config.get("WORKER_ENGINE", "native") != "gpu":
+            return self.workers
+        return self.workers * int(self.config.get("GPU_WORKERS_PER_INSTANCE", "1"))
+
     def remote_env(self, coordinator_address: str, role: str, worker_index: int | None = None) -> str:
         values = {
             "RUN_ID": self.run_id,
@@ -847,7 +853,7 @@ class Cluster:
                 (
                     f"WORKER_ENGINE={shlex.quote(self.config.get('WORKER_ENGINE', 'native'))} "
                     "bash /opt/velox-testing/presto/aws/ec2/remote/"
-                    f"wait_for_cluster.sh {shlex.quote(address)} {self.workers} {timeout}"
+                    f"wait_for_cluster.sh {shlex.quote(address)} {self.presto_workers()} {timeout}"
                 ),
             ],
             f"wait for workers {self.run_id}",

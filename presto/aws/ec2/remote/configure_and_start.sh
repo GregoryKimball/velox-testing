@@ -173,21 +173,28 @@ if [[ ${WORKER_ENGINE} == java || ${ROLE} == coordinator ]]; then
     max-open-sort-files "${ICEBERG_MAX_OPEN_SORT_FILES:-50}"
 fi
 
+# GPU instances with several GPUs run one presto_server per GPU.
+gpu_workers=1
+if [[ ${WORKER_ENGINE} == gpu ]]; then
+  gpu_workers=${GPU_WORKERS_PER_INSTANCE:-1}
+fi
+presto_workers=$((WORKER_COUNT * gpu_workers))
+
 if [[ ${ROLE} == coordinator ]]; then
   set_property "${final}/config.properties" discovery.uri \
     "http://${COORDINATOR_ADDRESS}:8080"
   set_property "${final}/config.properties" query-manager.required-workers \
-    "${WORKER_COUNT}"
+    "${presto_workers}"
   set_property "${final}/config.properties" \
     query-manager.required-workers-max-wait 10m
   set_property "${final}/config.properties" query.max-total-memory-per-node \
     "${COORDINATOR_QUERY_TOTAL_MEMORY_PER_NODE_GIB}GB"
   set_property "${final}/config.properties" query.max-total-memory \
-    "$((COORDINATOR_QUERY_TOTAL_MEMORY_PER_NODE_GIB * WORKER_COUNT))GB"
+    "$((COORDINATOR_QUERY_TOTAL_MEMORY_PER_NODE_GIB * presto_workers))GB"
   set_property "${final}/config.properties" query.max-memory-per-node \
     "${COORDINATOR_QUERY_MEMORY_PER_NODE_GIB}GB"
   set_property "${final}/config.properties" query.max-memory \
-    "$((COORDINATOR_QUERY_MEMORY_PER_NODE_GIB * WORKER_COUNT))GB"
+    "$((COORDINATOR_QUERY_MEMORY_PER_NODE_GIB * presto_workers))GB"
   set_property "${final}/config.properties" memory.heap-headroom-per-node \
     "${COORDINATOR_HEADROOM_GIB}GB"
   if [[ ${native} == true ]]; then
@@ -349,6 +356,31 @@ PY
 fi
 
 cp -a "${final}/." "${assembled}/"
+etc_mounts=(-v "${assembled}:/opt/presto-server/etc:ro")
+if [[ ${ROLE} == worker ]] && ((gpu_workers > 1)); then
+  # The worker container starts one presto_server per GPU, each reading
+  # /opt/presto-server/etc<gpu> with its own HTTP and UCX ports, node id and
+  # SSD cache directory.
+  etc_mounts=()
+  for ((gpu = 0; gpu < gpu_workers; gpu++)); do
+    etc="${assembled}${gpu}"
+    rm -rf "${etc}"
+    cp -a "${final}/." "${etc}/"
+    port=$((8080 + 10 * gpu))
+    set_property "${etc}/config.properties" http-server.http.port "${port}"
+    upsert_property "${etc}/config.properties" cudf.exchange.server.port \
+      "$((port + 3))"
+    set_property "${etc}/node.properties" node.id \
+      "aws-${RUN_ID}-worker-${WORKER_INDEX}-gpu-${gpu}"
+    if ((ASYNC_CACHE_SSD_GIB > 0)); then
+      mkdir -p "${ASYNC_CACHE_SSD_PATH}/gpu${gpu}"
+      chmod 0777 "${ASYNC_CACHE_SSD_PATH}/gpu${gpu}"
+      upsert_property "${etc}/config.properties" async-cache-ssd-path \
+        "${ASYNC_CACHE_SSD_PATH}/gpu${gpu}/"
+    fi
+    etc_mounts+=(-v "${etc}:/opt/presto-server/etc${gpu}:ro")
+  done
+fi
 find "${base}" -type f -print0 | sort -z | xargs -0 sha256sum \
   >"${runtime_root}/base_config_${ROLE}.sha256"
 find "${final}" -type f -print0 | sort -z | xargs -0 sha256sum \
@@ -436,7 +468,7 @@ else
       -v "${repo}/presto/docker/launch_presto_servers.sh:/opt/launch_presto_servers.sh:ro"
       -e "GPU_S3_CREDENTIALS=${GPU_S3_CREDENTIALS:-none}"
       -e "GPU_NUMA_BIND=${GPU_NUMA_BIND:-true}"
-      -e CUDA_VISIBLE_DEVICES=0
+      -e "GPU_WORKERS_PER_INSTANCE=${gpu_workers}"
       -e "LD_LIBRARY_PATH=${ucx_root}/lib:${ucx_root}/lib/ucx:/usr/lib64/presto-native-libs:/usr/local/cuda/lib64:/usr/local/lib"
       -e "UCX_MODULE_DIR=${ucx_root}/lib/ucx"
       -e "UCX_TLS=${GPU_UCX_TLS:-tcp,cuda_copy}"
@@ -462,6 +494,9 @@ else
     for variable in "${extra_env[@]}"; do
       [[ -n ${variable} ]] && gpu_args+=(-e "${variable}")
     done
+    if ((gpu_workers == 1)); then
+      gpu_args+=(-e CUDA_VISIBLE_DEVICES=0)
+    fi
   fi
   docker run -d \
     --name "${worker_name}" \
@@ -472,7 +507,7 @@ else
     -e "AWS_DEFAULT_REGION=${AWS_REGION}" \
     -e "AWS_REGION=${AWS_REGION}" \
     -e "SERVER_START_TIMESTAMP=${timestamp}" \
-    -v "${assembled}:/opt/presto-server/etc:ro" \
+    "${etc_mounts[@]}" \
     -v "${runtime_root}/metastore:/var/lib/presto/data/hive/metastore" \
     -v "${runtime_root}/data:/var/lib/presto/data/local" \
     -v "${runtime_root}/logs:/opt/presto-server/logs" \
