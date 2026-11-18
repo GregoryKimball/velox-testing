@@ -308,6 +308,12 @@ else
         [[ -n ${property} ]] || continue
         upsert_property "${final}/config.properties" "${property%%=*}" "${property#*=}"
       done
+      # Semicolon-separated key=value pairs added to the worker hive catalog.
+      IFS=';' read -r -a extra_hive_properties <<<"${GPU_EXTRA_HIVE_CONFIG:-}"
+      for property in "${extra_hive_properties[@]}"; do
+        [[ -n ${property} ]] || continue
+        upsert_property "${final}/catalog/hive.properties" "${property%%=*}" "${property#*=}"
+      done
     fi
   else
     upsert_property "${final}/config.properties" query.max-total-memory-per-node \
