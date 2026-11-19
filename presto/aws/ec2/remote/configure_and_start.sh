@@ -197,6 +197,31 @@ if [[ ${ROLE} == coordinator ]]; then
     "$((COORDINATOR_QUERY_MEMORY_PER_NODE_GIB * presto_workers))GB"
   set_property "${final}/config.properties" memory.heap-headroom-per-node \
     "${COORDINATOR_HEADROOM_GIB}GB"
+  # Semicolon-separated key=value pairs added to the coordinator config.properties.
+  IFS=';' read -r -a extra_coordinator_properties <<<"${COORDINATOR_EXTRA_CONFIG:-}"
+  for property in "${extra_coordinator_properties[@]}"; do
+    [[ -n ${property} ]] || continue
+    upsert_property "${final}/config.properties" "${property%%=*}" "${property#*=}"
+  done
+  if [[ -n ${COORDINATOR_HBO_PLUGIN_S3_URI:-} ]]; then
+    # History-based optimization keeps plan statistics in a local Redis that outlives coordinator restarts.
+    cat >"${final}/redis-provider.properties" <<'EOF'
+coordinator=true
+hbo.redis-provider.enabled=true
+hbo.redis-provider.total-fetch-timeoutms=5000
+hbo.redis-provider.total-set-timeoutms=5000
+hbo.redis-provider.default-ttl-seconds=4320000
+hbo.redis-provider.cluster-mode-enabled=false
+hbo.redis-provider.server_uri=redis://localhost:6379/
+EOF
+    upsert_property "${final}/config.properties" optimizer.use-history-based-plan-statistics true
+    upsert_property "${final}/config.properties" optimizer.track-history-based-plan-statistics true
+    upsert_property "${final}/config.properties" optimizer.track-history-stats-from-failed-queries true
+    # Partial aggregation is planned from the reduction it achieved in earlier runs.
+    upsert_property "${final}/config.properties" optimizer.partial-aggregation-strategy AUTOMATIC
+    upsert_property "${final}/config.properties" optimizer.use-partial-aggregation-history true
+    upsert_property "${final}/config.properties" optimizer.track-partial-aggregation-history true
+  fi
   if [[ ${native} == true ]]; then
     set_property "${final}/config.properties" single-node-execution-enabled false
     set_property "${final}/config.properties" experimental.enable-dynamic-filtering \
@@ -413,8 +438,24 @@ docker rm -f presto-coordinator presto-native-worker-cpu presto-native-worker-gp
 timestamp=$(date -u +%Y%m%dT%H%M%SZ)
 
 if [[ ${ROLE} == coordinator ]]; then
+  hbo_mount_args=()
+  if [[ -n ${COORDINATOR_HBO_PLUGIN_S3_URI:-} ]]; then
+    hbo_plugin="${runtime_root}/hbo-plugin"
+    if [[ ! -d ${hbo_plugin} ]]; then
+      mkdir -p "${hbo_plugin}.tmp"
+      aws s3 cp "${COORDINATOR_HBO_PLUGIN_S3_URI}" - --only-show-errors | tar -xz -C "${hbo_plugin}.tmp"
+      mv "${hbo_plugin}.tmp" "${hbo_plugin}"
+    fi
+    if [[ -z $(docker ps -q --filter name=^presto-hbo-redis$) ]]; then
+      docker rm -f presto-hbo-redis 2>/dev/null || true
+      docker run -d --name presto-hbo-redis --network host --restart unless-stopped redis:7-alpine \
+        redis-server --port 6379 --save "" --appendonly no
+    fi
+    hbo_mount_args=(-v "${hbo_plugin}:/opt/presto-server/plugin/redis-hbo-provider:ro")
+  fi
   docker run -d \
     --name presto-coordinator \
+    "${hbo_mount_args[@]}" \
     --network host \
     --restart no \
     -e "AWS_DEFAULT_REGION=${AWS_REGION}" \
